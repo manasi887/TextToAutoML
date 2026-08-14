@@ -60,7 +60,10 @@ async def upload_dataset(file: UploadFile = File(...)):
     processed_df, preprocessing = preprocess_dataset(df)
 
     # Step 5 and 6: Dataset Intelligence and AutoML recommendation engine
-    automl_recommendation = generate_automl_recommendation(processed_df)
+    automl_recommendation = generate_automl_recommendation(
+        processed_df,
+        generated_columns=preprocessing.get("generated_columns", []),
+    )
     dataset_intelligence = automl_recommendation["dataset_intelligence"]
 
     return {

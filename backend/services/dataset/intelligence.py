@@ -96,12 +96,14 @@ def detect_identifier_columns(df: pd.DataFrame) -> Dict[str, object]:
 def detect_high_cardinality(
     df: pd.DataFrame,
     threshold: float = 0.5,
+    exclude_columns: Optional[List[str]] = None,
 ) -> Dict[str, object]:
     """Detect high-cardinality categorical columns with dataset-size-aware thresholds."""
 
     if threshold <= 0 or threshold > 1:
         raise ValueError("threshold must be a float between 0 and 1.")
 
+    exclude_set = set(exclude_columns or [])
     row_count = len(df)
     candidate_columns = df.select_dtypes(
         include=["object", "string", "category"]
@@ -109,6 +111,9 @@ def detect_high_cardinality(
     high_cardinality_columns = []
 
     for column in candidate_columns:
+        if column in exclude_set:
+            continue
+
         series = df[column]
         non_null_values = series.dropna()
         if non_null_values.empty:
@@ -141,14 +146,17 @@ def detect_high_cardinality(
 def generate_dataset_recommendations(
     df: pd.DataFrame,
     high_cardinality_threshold: float = 0.5,
+    exclude_columns: Optional[List[str]] = None,
 ) -> Dict[str, object]:
     """Generate a dataset intelligence report with actionable recommendations."""
 
     identifier_report = detect_identifier_columns(df)
     constant_report = detect_constant_columns(df)
+    exclude_set = set((exclude_columns or []) + identifier_report["identifier_columns"])
     high_cardinality_report = detect_high_cardinality(
         df,
         threshold=high_cardinality_threshold,
+        exclude_columns=list(exclude_set),
     )
 
     recommendations: List[str] = []

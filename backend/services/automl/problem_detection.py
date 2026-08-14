@@ -13,7 +13,10 @@ from services.dataset.intelligence import (
 )
 
 
-def detect_target_candidates(df: pd.DataFrame) -> Dict[str, object]:
+def detect_target_candidates(
+    df: pd.DataFrame,
+    generated_columns: List[str] | None = None,
+) -> Dict[str, object]:
     """Rank likely target columns using multiple positive and negative signals."""
 
     identifier_report = detect_identifier_columns(df)
@@ -21,6 +24,8 @@ def detect_target_candidates(df: pd.DataFrame) -> Dict[str, object]:
     exclude_columns = set(identifier_report["identifier_columns"]) | set(
         constant_report["constant_columns"]
     )
+    if generated_columns:
+        exclude_columns |= set(generated_columns)
 
     row_count = len(df)
     candidates: List[Dict[str, object]] = []
@@ -178,7 +183,10 @@ def detect_problem_type(df: pd.DataFrame, target_column: str) -> Dict[str, objec
     }
 
 
-def generate_automl_recommendation(df: pd.DataFrame) -> Dict[str, object]:
+def generate_automl_recommendation(
+    df: pd.DataFrame,
+    generated_columns: List[str] | None = None,
+) -> Dict[str, object]:
     """
     Generate a combined AutoML recommendation report for the dataset.
 
@@ -193,7 +201,7 @@ def generate_automl_recommendation(df: pd.DataFrame) -> Dict[str, object]:
     """
 
     intelligence_report = generate_dataset_recommendations(df)
-    target_report = detect_target_candidates(df)
+    target_report = detect_target_candidates(df, generated_columns=generated_columns)
     candidates = target_report.get("target_candidates", [])
     recommended_target = candidates[0]["column"] if candidates else None
 
@@ -234,6 +242,10 @@ def generate_automl_recommendation(df: pd.DataFrame) -> Dict[str, object]:
         "status": "Completed",
         "problem_type": problem_type,
         "recommended_target": recommended_target,
+        "confidence": round(target_report.get("target_candidates", [{}])[0].get("confidence", 0.0), 4) if target_report.get("target_candidates") else 0.0,
+        "requires_user_confirmation": target_report.get("requires_user_confirmation", False),
+        "problem_type": problem_type,
+        "problem_confidence": problem_report.get("confidence", 0.0),
         "target_candidates": candidates,
         "recommended_models": model_report["recommended_models"],
         "recommendations": recommendations,

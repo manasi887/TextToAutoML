@@ -371,7 +371,36 @@ def extract_date_features(df: pd.DataFrame, copy_df: bool = True):
             weekday_col
         ])
 
+    preprocessing_report = {
+        "status": "Completed",
+        "details": {
+            "datetime_columns": datetime_columns,
+            "generated_columns": generated_columns,
+            "generated_column_count": len(generated_columns)
+        }
+    }
+
+    if not datetime_columns:
+        return updated_df, {
+            "status": "Skipped",
+            "reason": "No datetime columns found."
+        }
+
+    if not generated_columns and datetime_columns:
+        preprocessing_report["details"]["generated_columns"] = []
+
+    return updated_df, preprocessing_report
+
     preprocessing_info = {
+        "status": "Completed",
+        "details": {
+            "datetime_columns": datetime_columns,
+            "generated_columns": generated_columns,
+            "generated_column_count": len(generated_columns)
+        }
+    }
+
+    preprocessing_report = {
         "status": "Completed",
         "details": {
             "datetime_columns": datetime_columns,
@@ -450,6 +479,10 @@ def calculate_delivery_time(df: pd.DataFrame, copy_df: bool = True):
         }
     }
 
+    if not isinstance(preprocessing_report := preprocessing_report if 'preprocessing_report' in globals() else None, dict):
+        preprocessing_report = {"generated_columns": []}
+    preprocessing_report["generated_columns"] = list(dict.fromkeys(preprocessing_report.get("generated_columns", []) + [delivery_column]))
+
     return updated_df, preprocessing_info
 
 
@@ -469,7 +502,9 @@ def preprocess_dataset(df: pd.DataFrame):
     Run the complete preprocessing pipeline.
     """
 
-    preprocessing_report = {}
+    preprocessing_report = {
+        "generated_columns": []
+    }
 
     working_df = df.copy()
 
