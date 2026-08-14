@@ -62,91 +62,113 @@ class _OneHotEncoder:
 
 
 def prepare_training_data(df: pd.DataFrame, target_column: str) -> Dict[str, object]:
-    """
-    Prepare a dataset for machine learning.
+      """
+      Prepare a dataset for machine learning (data preparation stage of AutoML).
 
-    Strategy:
-    - Separate features (X) from the target (y).
-    - Drop rows with missing target values because supervised learning requires
-      a valid label for each training example.
-    - Fill remaining missing feature values using mean for numeric columns and
-      mode for categorical columns.
-    - Encode categorical features automatically:
-      - Use one-hot encoding for low-cardinality categorical columns.
-      - Use label encoding for higher-cardinality categorical columns.
-    - Encode the target with label encoding when it is categorical.
+      Responsibilities:
+      - Accept a cleaned DataFrame and a selected target column name.
+      - Drop rows with missing target values.
+      - Remove identifier and constant columns detected by the dataset intelligence
+        helpers so they are not used as features.
+      - Perform simple imputation for remaining missing feature values.
+      - Return encoded feature matrix (X), target (y) and preprocessing metadata
+        including the encoders object for later use during inference.
 
-    The function returns feature and target objects plus metadata about the
-    encoders that were applied.
-    """
+      Returns a dictionary with keys: "X", "y", "feature_names", "encoders",
+      and "preprocessing" (metadata about removed columns).
+      """
 
-    if target_column not in df.columns:
-        raise ValueError(f"Target column '{target_column}' is not present in the DataFrame.")
+      # Validate target
+      if target_column not in df.columns:
+          raise ValueError(f"Target column '{target_column}' is not present in the DataFrame.")
 
-    working_df = df.copy()
-    target_series = working_df[target_column]
+      working_df = df.copy()
 
-    rows_before = len(working_df)
-    if target_series.isna().any():
-        working_df = working_df[target_series.notna()].reset_index(drop=True)
-        target_series = working_df[target_column]
+      # Drop rows with missing target values
+      if working_df[target_column].isna().any():
+          working_df = working_df[working_df[target_column].notna()].reset_index(drop=True)
 
-    X = working_df.drop(columns=[target_column])
-    y = target_series
-    encoders: Dict[str, Dict[str, object]] = {}
+      # Separate X and y
+      y = working_df[target_column]
+      X = working_df.drop(columns=[target_column])
 
-    if _is_categorical_series(y):
-        target_encoder = _LabelEncoder()
-        y = target_encoder.fit_transform(y)
-        encoders["target"] = {
-            "type": "label",
-            "encoder": target_encoder,
-            "classes": target_encoder.classes_,
-        }
+      # Capture target metadata before any transformation
+      target_dtype = str(y.dtype)
+      target_encoded = False
+      target_encoder = None
 
-    X = X.copy()
-    _fill_missing_values(X)
+      # Detect and remove identifier and constant columns using dataset intelligence
+      # Import locally to avoid circular imports at module import time
+      from services.dataset.intelligence import detect_identifier_columns, detect_constant_columns
 
-    categorical_columns = X.select_dtypes(include=["object", "string", "category"]).columns.tolist()
+      identifier_report = detect_identifier_columns(working_df)
+      constant_report = detect_constant_columns(working_df)
 
-    for column in categorical_columns:
-        unique_count = int(X[column].nunique(dropna=True))
-        if unique_count <= 1:
-            encoder = _LabelEncoder()
-            X[column] = encoder.fit_transform(X[column])
-            encoders[column] = {
-                "type": "label",
-                "encoder": encoder,
-                "classes": encoder.classes_,
-            }
-            continue
+      identifier_cols = [c for c in identifier_report.get("identifier_columns", []) if c in X.columns]
+      constant_cols = [c for c in constant_report.get("constant_columns", []) if c in X.columns]
 
-        if unique_count <= 10:
-            encoder = _OneHotEncoder(prefix=column)
-            encoded_df = encoder.fit_transform(X[column])
-            X = X.drop(columns=[column]).join(encoded_df)
-            encoders[column] = {
-                "type": "onehot",
-                "encoder": encoder,
-                "feature_names": encoded_df.columns.tolist(),
-            }
-        else:
-            encoder = _LabelEncoder()
-            X[column] = encoder.fit_transform(X[column])
-            encoders[column] = {
-                "type": "label",
-                "encoder": encoder,
-                "classes": encoder.classes_,
-            }
+      removed_columns = {
+          "identifier_columns": identifier_cols,
+          "constant_columns": constant_cols,
+      }
 
-    feature_names = X.columns.tolist()
+      cols_to_drop = identifier_cols + constant_cols
+      if cols_to_drop:
+          X = X.drop(columns=cols_to_drop, errors="ignore")
 
-    return {
-        "X": X,
-        "y": y,
-        "feature_names": feature_names,
-        "encoders": encoders,
-    }
+      # Simple imputation for remaining missing values
+      # Numeric -> mean, Categorical -> mode (or '<missing>' if mode not available)
+      numeric_columns = X.select_dtypes(include=["number"]).columns.tolist()
+      for col in numeric_columns:
+          if X[col].isna().any():
+              X[col] = X[col].fillna(X[col].mean())
+
+      categorical_columns = X.select_dtypes(include=["object", "string", "category"]).columns.tolist()
+      for col in categorical_columns:
+          if X[col].isna().any():
+              mode_vals = X[col].mode(dropna=True)
+              fill_value = mode_vals.iloc[0] if not mode_vals.empty else "<missing>"
+              X[col] = X[col].fillna(fill_value)
+
+      # Encode categorical features and collect encoders
+      encoded_X, encoders = encode_features(X)
+
+      feature_names = encoded_X.columns.tolist()
+
+      # Encode the target column when it is categorical
+      if _is_categorical_series(y):
+          try:
+              from sklearn.preprocessing import LabelEncoder
+          except Exception as exc:  # pragma: no cover
+              raise ImportError("scikit-learn is required to encode categorical target values") from exc
+
+          label_encoder = LabelEncoder()
+          target_values = y.fillna("<missing>").astype(str)
+          encoded_target = label_encoder.fit_transform(target_values)
+          y = pd.Series(encoded_target, name=target_column)
+
+          target_encoded = True
+          target_encoder = label_encoder
+
+      preprocessing_metadata = {
+          "removed_columns": removed_columns,
+          "imputed_columns": {
+              "numeric": numeric_columns,
+              "categorical": categorical_columns,
+          },
+          "target_column": target_column,
+          "target_dtype": target_dtype,
+          "target_encoded": target_encoded,
+          "target_encoder": target_encoder,
+      }
+
+      return {
+          "X": encoded_X,
+          "y": y.reset_index(drop=True),
+          "feature_names": feature_names,
+          "encoders": encoders,
+          "preprocessing": preprocessing_metadata,
+      }
 
 
 def _fill_missing_values(df: pd.DataFrame) -> None:
@@ -170,6 +192,145 @@ def _is_categorical_series(series: pd.Series) -> bool:
         or pd.api.types.is_object_dtype(series)
         or pd.api.types.is_bool_dtype(series)
     )
+
+
+def encode_features(X: pd.DataFrame, low_cardinality_threshold: int = 10) -> (pd.DataFrame, Dict[str, object]):
+    """
+    Encode categorical features in X using sklearn encoders.
+
+    Strategy:
+    - For low-cardinality categorical columns (<= low_cardinality_threshold),
+      use OneHotEncoder (sparse=False, handle_unknown='ignore').
+    - For higher-cardinality categorical columns, use OrdinalEncoder with
+      unknown values mapped to -1.
+
+    Returns encoded DataFrame and a dictionary of encoders keyed by original
+    column name. Each encoder entry contains metadata required for inference.
+    """
+
+    X_out = X.copy()
+    encoders: Dict[str, object] = {}
+
+    # Detect categorical columns
+    categorical_columns = X_out.select_dtypes(include=["object", "string", "category"]).columns.tolist()
+
+    for col in categorical_columns:
+        # Work on a temporary copy of the column as strings to preserve categories
+        col_series = X_out[col].astype(str).fillna("<missing>")
+        unique_count = int(col_series.nunique(dropna=True))
+
+        if unique_count == 0:
+            # Empty column - leave as-is
+            encoders[col] = {"type": "empty", "encoder": None}
+            continue
+
+        if unique_count <= low_cardinality_threshold:
+            # One-hot encode
+            try:
+                from sklearn.preprocessing import OneHotEncoder
+            except Exception as exc:  # pragma: no cover - environment-specific
+                raise ImportError("scikit-learn is required for encoding categorical features") from exc
+
+            # OneHotEncoder parameter name changed across sklearn versions
+            try:
+                ohe = OneHotEncoder(sparse=False, handle_unknown="ignore")
+            except TypeError:
+                # newer sklearns use sparse_output instead of sparse
+                ohe = OneHotEncoder(sparse_output=False, handle_unknown="ignore")
+
+            values = col_series.values.reshape(-1, 1)
+            ohe.fit(values)
+            arr = ohe.transform(values)
+
+            # Feature names
+            try:
+                feature_names = ohe.get_feature_names_out([col]).tolist()
+            except Exception:
+                # Backwards compatibility with older sklearn
+                categories = ohe.categories_[0]
+                feature_names = [f"{col}_{c}" for c in categories]
+
+            df_ohe = pd.DataFrame(arr, columns=feature_names, index=X_out.index)
+            X_out = X_out.drop(columns=[col]).join(df_ohe)
+
+            encoders[col] = {
+                "type": "onehot",
+                "encoder": ohe,
+                "feature_names": feature_names,
+            }
+        else:
+            # Ordinal encode (preserve as integer labels)
+            try:
+                from sklearn.preprocessing import OrdinalEncoder
+            except Exception as exc:  # pragma: no cover
+                raise ImportError("scikit-learn is required for encoding categorical features") from exc
+
+            oe = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
+            values = col_series.values.reshape(-1, 1)
+            oe.fit(values)
+            arr = oe.transform(values).astype(int).ravel()
+
+            # Replace column in place with integer encoding
+            X_out[col] = arr
+
+            # Store categories for reference
+            categories = oe.categories_[0].tolist() if hasattr(oe, "categories_") else []
+            encoders[col] = {
+                "type": "ordinal",
+                "encoder": oe,
+                "categories": categories,
+            }
+
+    return X_out, encoders
+
+
+def split_dataset(X: pd.DataFrame, y: pd.Series, test_size: float = 0.2, problem_type: str | None = None, random_state: int = 42):
+    """
+    Split features and target into train/test sets using sklearn.train_test_split.
+
+    - random_state=42 for reproducibility
+    - stratify is applied only for classification tasks. If problem_type is
+      provided and contains the word 'class', stratify is enabled. If
+      problem_type is None, a heuristic is used to infer classification based
+      on y's dtype and unique count.
+
+    Returns: X_train, X_test, y_train, y_test
+    """
+
+    try:
+        from sklearn.model_selection import train_test_split
+    except Exception as exc:  # pragma: no cover
+        raise ImportError("scikit-learn is required for dataset splitting") from exc
+
+    stratify = None
+    if problem_type is not None:
+        if "class" in problem_type.lower():
+            stratify = y
+    else:
+        # Heuristic: treat as classification if y is non-numeric or low-cardinality
+        try:
+            if pd.api.types.is_object_dtype(y) or pd.api.types.is_bool_dtype(y) or pd.api.types.is_categorical_dtype(y):
+                stratify = y
+            else:
+                # numeric: if very few unique values relative to rows, treat as classification
+                unique = int(y.nunique(dropna=True))
+                if unique > 0 and unique <= max(2, min(20, int(len(y) * 0.05))):
+                    stratify = y
+        except Exception:
+            stratify = None
+
+    # train_test_split will raise if stratify has a class with only one sample; handle gracefully
+    try:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=test_size, random_state=random_state, stratify=stratify
+        )
+    except ValueError:
+        # Fallback to non-stratified split
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=test_size, random_state=random_state, stratify=None
+        )
+
+    return X_train.reset_index(drop=True), X_test.reset_index(drop=True), y_train.reset_index(drop=True), y_test.reset_index(drop=True)
 
 
 def train_models(X_train: pd.DataFrame, y_train: pd.Series, problem_type: str) -> Dict[str, object]:

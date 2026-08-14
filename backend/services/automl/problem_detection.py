@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import re
 from typing import Dict, List
 
 import pandas as pd
@@ -12,14 +14,7 @@ from services.dataset.intelligence import (
 
 
 def detect_target_candidates(df: pd.DataFrame) -> Dict[str, object]:
-    """
-    Detect columns that are reasonable prediction target candidates.
-
-    The function excludes identifier and constant columns, then evaluates
-    numeric and categorical columns for meaningful variation. Each candidate
-    receives a score that combines unique value richness, missing value
-    completeness, and data type suitability.
-    """
+    """Rank likely target columns using multiple positive and negative signals."""
 
     identifier_report = detect_identifier_columns(df)
     constant_report = detect_constant_columns(df)
@@ -38,105 +33,148 @@ def detect_target_candidates(df: pd.DataFrame) -> Dict[str, object]:
         if pd.api.types.is_datetime64_any_dtype(series):
             continue
 
-        if _is_numeric_target_series(series):
-            datatype = "numeric"
-        elif _is_categorical_target_series(series):
-            datatype = "categorical"
-        else:
-            continue
-
         non_null_series = series.dropna()
-        unique_count = int(non_null_series.nunique(dropna=True))
-        if unique_count < 2:
+        if non_null_series.empty or non_null_series.nunique(dropna=True) < 2:
             continue
 
-        missing_percentage = _missing_percentage(series, row_count)
+        datatype = _infer_candidate_datatype(series)
+        if datatype is None:
+            continue
+
+        unique_count = int(non_null_series.nunique(dropna=True))
         unique_ratio = unique_count / row_count if row_count else 0.0
-        score = _score_target_candidate(datatype, unique_count, unique_ratio, missing_percentage)
+        missing_percentage = _missing_percentage(series, row_count)
+        target_name_signal = _target_name_strength(column)
+        score, confidence, reasons, problem_type = _score_target_candidate(
+            series,
+            column,
+            datatype,
+            unique_count,
+            unique_ratio,
+            missing_percentage,
+            target_name_signal,
+        )
+
+        if score <= 0:
+            continue
 
         candidates.append(
             {
                 "column": column,
                 "datatype": datatype,
                 "score": round(score, 4),
+                "confidence": round(confidence, 4),
+                "inferred_problem_type": problem_type,
+                "reasons": reasons,
             }
         )
 
-    candidates.sort(key=lambda item: item["score"], reverse=True)
+    candidates.sort(key=lambda item: (item["score"], item["confidence"]), reverse=True)
+
+    recommended_target = candidates[0]["column"] if candidates else None
+    requires_confirmation = False
+    if recommended_target is not None:
+        if len(candidates) > 1:
+            top_score = candidates[0]["score"]
+            second_score = candidates[1]["score"]
+            if abs(top_score - second_score) < 2.0:
+                requires_confirmation = True
+            if (
+                candidates[0]["datatype"] == "numeric"
+                and candidates[1]["datatype"] == "numeric"
+                and "target_like_name" in candidates[0]["reasons"]
+                and "target_like_name" in candidates[1]["reasons"]
+            ):
+                requires_confirmation = True
+        if candidates[0]["confidence"] < 0.7:
+            requires_confirmation = True
 
     return {
         "status": "Completed",
+        "recommended_target": recommended_target,
+        "requires_user_confirmation": requires_confirmation,
         "target_candidates": candidates,
     }
 
 
 def detect_problem_type(df: pd.DataFrame, target_column: str) -> Dict[str, object]:
-    """
-    Determine the best matching machine learning problem type for a selected target.
-
-    Decision rules:
-    - If no target is selected or the target column is missing, the task is
-      treated as clustering because there is no supervised label.
-    - Numeric targets are mapped to regression.
-    - Boolean or binary categorical targets are mapped to binary classification.
-    - Multi-class categorical targets are mapped to multi-class classification.
-    """
+    """Infer the problem type from target characteristics rather than raw dtype alone."""
 
     if not target_column or target_column.strip() == "" or target_column not in df.columns:
         return {
             "status": "Completed",
             "problem_type": "Clustering",
+            "confidence": 0.0,
             "reason": "No target column was selected or the specified target column was not found.",
         }
 
     series = df[target_column]
-
-    if _is_numeric_target_series(series):
+    non_null_series = series.dropna()
+    if non_null_series.empty:
         return {
             "status": "Completed",
-            "problem_type": "Regression",
-            "reason": "Selected target is numeric, which typically indicates a regression task.",
+            "problem_type": "Clustering",
+            "confidence": 0.0,
+            "reason": "The selected target contains no usable values.",
         }
 
-    if pd.api.types.is_bool_dtype(series):
+    unique_classes = int(non_null_series.nunique(dropna=True))
+    is_numeric = _is_numeric_target_series(series)
+    is_categorical = _is_categorical_target_series(series)
+    is_bool = pd.api.types.is_bool_dtype(series)
+
+    if is_bool:
         return {
             "status": "Completed",
             "problem_type": "Binary Classification",
-            "reason": "Selected target is boolean, which indicates a binary classification task.",
+            "confidence": 0.96,
+            "reason": "The target is boolean, which strongly indicates a binary classification task.",
         }
 
-    if _is_categorical_target_series(series):
-        unique_classes = int(series.dropna().nunique(dropna=True))
-        if unique_classes == 2:
+    if is_numeric:
+        if unique_classes == 2 and _is_binary_numeric_target(non_null_series):
             return {
                 "status": "Completed",
                 "problem_type": "Binary Classification",
-                "reason": "Selected target is categorical with exactly two classes.",
+                "confidence": 0.92,
+                "reason": "The target is numeric with exactly two discrete classes, which strongly indicates a binary classification task.",
+            }
+
+        return {
+            "status": "Completed",
+            "problem_type": "Regression",
+            "confidence": 0.9,
+            "reason": "The target is numeric, which strongly indicates a regression task.",
+        }
+
+    if is_categorical:
+        if unique_classes <= 2:
+            return {
+                "status": "Completed",
+                "problem_type": "Binary Classification",
+                "confidence": 0.9,
+                "reason": "The target is categorical with exactly two classes.",
             }
         if unique_classes > 2:
             return {
                 "status": "Completed",
                 "problem_type": "Multi-class Classification",
-                "reason": "Selected target is categorical with more than two classes.",
+                "confidence": 0.88,
+                "reason": "The target is categorical with more than two classes.",
             }
 
         return {
             "status": "Completed",
             "problem_type": "Clustering",
-            "reason": "Selected target has no meaningful class variation.",
-        }
-
-    if pd.api.types.is_datetime64_any_dtype(series):
-        return {
-            "status": "Completed",
-            "problem_type": "Regression",
-            "reason": "Selected target is datetime-like, which is often treated as regression in AutoML workflows.",
+            "confidence": 0.2,
+            "reason": "The target has insufficient class variation to support supervised learning.",
         }
 
     return {
         "status": "Completed",
         "problem_type": "Clustering",
-        "reason": "Selected target type is not numeric or categorical, so a clustering task is the safest fallback.",
+        "confidence": 0.0,
+        "reason": "The selected target does not provide enough supervised signal for a reliable task classification.",
     }
 
 
@@ -177,7 +215,7 @@ def generate_automl_recommendation(df: pd.DataFrame) -> Dict[str, object]:
 
     if recommended_target:
         recommendations.append(
-            f"Consider using '{recommended_target}' as the target column for the AutoML pipeline."
+            f"Consider using '{recommended_target}' as the target column"
         )
         recommendations.append(
             f"The dataset appears suited for a {problem_type} task based on the selected target."
@@ -205,23 +243,17 @@ def generate_automl_recommendation(df: pd.DataFrame) -> Dict[str, object]:
 
 
 def recommend_models(problem_type: str) -> Dict[str, object]:
-    """
-    Recommend machine learning algorithms based on the detected problem type.
-
-    The recommendations are chosen to cover simple baselines and powerful
-    tree-based learners for supervised tasks, while clustering tasks use
-    commonly applied unsupervised algorithms.
-    """
+    """Recommend baseline algorithms for the inferred task type."""
 
     normalized_type = (problem_type or "").strip().lower()
-    if normalized_type == "regression":
+    if "regression" in normalized_type:
         recommended_models = [
             "Linear Regression - a strong baseline for numeric targets and simple relationships.",
             "Decision Tree Regressor - captures nonlinear relationships and interactions.",
             "Random Forest Regressor - robust ensemble model for improved accuracy and stability.",
             "XGBoost Regressor - high-performance gradient boosting for complex regression tasks.",
         ]
-    elif normalized_type in {"binary classification", "multi-class classification", "classification"}:
+    elif "binary classification" in normalized_type or "multi-class classification" in normalized_type or "classification" in normalized_type:
         recommended_models = [
             "Logistic Regression - a reliable baseline for classification with interpretable coefficients.",
             "Decision Tree Classifier - easy to understand and handles nonlinear decision boundaries.",
@@ -245,12 +277,24 @@ def recommend_models(problem_type: str) -> Dict[str, object]:
     }
 
 
+def _infer_candidate_datatype(series: pd.Series) -> str | None:
+    if pd.api.types.is_numeric_dtype(series):
+        return "numeric"
+    if _is_categorical_target_series(series):
+        return "categorical"
+    return None
+
+
 def _is_numeric_target_series(series: pd.Series) -> bool:
     return pd.api.types.is_numeric_dtype(series)
 
 
 def _is_categorical_target_series(series: pd.Series) -> bool:
-    return pd.api.types.is_categorical_dtype(series) or pd.api.types.is_string_dtype(series) or pd.api.types.is_object_dtype(series)
+    return (
+        pd.api.types.is_categorical_dtype(series)
+        or pd.api.types.is_string_dtype(series)
+        or pd.api.types.is_object_dtype(series)
+    )
 
 
 def _missing_percentage(series: pd.Series, row_count: int) -> float:
@@ -260,25 +304,163 @@ def _missing_percentage(series: pd.Series, row_count: int) -> float:
 
 
 def _score_target_candidate(
+    series: pd.Series,
+    column_name: str,
     datatype: str,
     unique_count: int,
     unique_ratio: float,
     missing_percentage: float,
-) -> float:
-    """
-    Compute a heuristic score for a potential target column.
+    target_name_signal: int,
+) -> tuple[float, float, List[str], str]:
+    """Compute a robust score and confidence for one target candidate."""
 
-    Numeric targets receive a larger base weight, while categorical targets
-    use a smaller base weight. Higher unique ratio and lower missing value
-    percentage increase the score.
-    """
+    reasons: List[str] = []
+    score = 0.0
+
+    normalized = str(column_name).lower()
+    if _looks_like_identifier_like_column(column_name):
+        score -= 6.0
+        reasons.append("identifier_like_name")
+
+    if "fnlwgt" in normalized or "weight_count" in normalized or "sample_weight" in normalized:
+        score -= 5.0
+        reasons.append("weight_like_metadata")
+
+    if _is_constant_series(series):
+        score -= 4.0
+        reasons.append("constant_column")
+
+    if pd.api.types.is_datetime64_any_dtype(series):
+        score -= 5.0
+        reasons.append("datetime_column")
+
+    if target_name_signal > 0:
+        score += 0.75 + min(target_name_signal, 2) * 0.75
+        reasons.append("target_like_name")
 
     if datatype == "numeric":
-        base_score = 1.0
-        unique_score = min(unique_ratio, 1.0) * 4.0
+        score += 1.5
+        reasons.append("numeric_dtype")
+        if unique_count == 2:
+            score += 6.0
+            reasons.append("binary_numeric_target_like")
+        elif unique_count <= 10:
+            score += 2.0
+            reasons.append("low_cardinality_numeric")
+        if unique_count > 10:
+            score += 1.5 + min(unique_ratio, 1.0) * 1.5
+            reasons.append("continuous_numeric")
+        if unique_count > 20 and not _looks_like_target_name(column_name):
+            score -= 2.5
+            reasons.append("continuous_feature_penalty")
+        score += min(unique_ratio, 1.0) * 2.0
+        if unique_count > 10 and not _looks_like_target_name(column_name):
+            score -= 2.0
+            reasons.append("measurement_feature_penalty")
     else:
-        base_score = 0.8
-        unique_score = min(unique_ratio, 1.0) * 3.0
+        score += 1.0
+        reasons.append("categorical_dtype")
+        if unique_count <= 2:
+            score += 3.5
+            reasons.append("binary_categorical_target_like")
+        elif 2 < unique_count <= 20:
+            score += 2.5
+            reasons.append("multi_class_target_like")
+        if unique_count > 2 and target_name_signal <= 1:
+            score -= 2.5
+            reasons.append("ordinary_multiclass_feature_penalty")
+        if not _looks_like_target_name(column_name):
+            score -= 2.5
+            reasons.append("generic_feature_penalty")
+        if unique_count > 10:
+            score -= 1.5
+            reasons.append("high_cardinality_feature_penalty")
+        score += min(unique_ratio, 1.0) * 1.5
+        if unique_count <= 20 and not _looks_like_identifier_like_column(column_name):
+            score += 0.75
+            reasons.append("plausible_class_target")
 
-    completeness_score = max(0.0, 1.0 - missing_percentage) * 2.0
-    return base_score + unique_score + completeness_score
+    if missing_percentage < 0.1:
+        score += 1.0
+        reasons.append("complete_column")
+    else:
+        score -= min(missing_percentage, 1.0) * 2.0
+        reasons.append("missing_values")
+
+    if datatype == "numeric" and unique_count > 20 and unique_count < 0.9 * len(series) and not _looks_like_target_name(column_name):
+        score -= 1.0
+        reasons.append("not_target_like")
+
+    problem_type = "Regression" if datatype == "numeric" else "Multi-class Classification"
+    if datatype != "numeric" and unique_count <= 2:
+        problem_type = "Binary Classification"
+
+    confidence = min(0.98, max(0.15, 0.4 + max(score, 0.0) / 10.0))
+    return score, confidence, reasons, problem_type
+
+
+def _looks_like_identifier_like_column(column_name: str) -> bool:
+    normalized = str(column_name).lower()
+    return any(token in normalized for token in ["id", "row", "customerid", "userid", "account", "transaction", "employee", "invoice", "code", "key", "index"])
+
+
+def _looks_like_target_name(column_name: str) -> bool:
+    normalized = str(column_name).lower().replace(" ", "_")
+    target_tokens = [
+        "target", "label", "class", "outcome", "result", "status", "income",
+        "sales", "price", "cost", "amount", "value", "revenue", "profit",
+        "score", "rating", "stroke", "churn", "exited", "purchase",
+        "default", "risk", "loan", "disease", "approved", "survived",
+    ]
+    return any(re.search(rf"(^|_){re.escape(token)}($|_)", normalized) for token in target_tokens)
+
+
+def _target_name_strength(column_name: str) -> int:
+    normalized = str(column_name).lower().replace(" ", "_")
+    if re.search(r"(^|_)(target|label|class|outcome|result)(_|$)", normalized):
+        return 4
+    if re.search(r"(^|_)(income|sales|price|value|revenue|profit)(_|$)", normalized):
+        return 3
+    if re.search(r"(^|_)(status)(_|$)", normalized):
+        return 1
+    if re.search(r"(^|_)(churn|exited|stroke|default|approved|purchased|survived|score|rating)(_|$)", normalized):
+        return 4
+    if re.search(r"(^|_)(id|row|customer|user)(_|$)", normalized):
+        return -4
+    return 0
+
+
+def _is_binary_numeric_target(series: pd.Series) -> bool:
+    non_null = series.dropna()
+    if non_null.empty:
+        return False
+
+    unique_count = int(non_null.nunique(dropna=True))
+    if unique_count != 2:
+        return False
+
+    numeric = pd.to_numeric(non_null, errors="coerce")
+    if numeric.isna().any():
+        return False
+
+    rounded = numeric.round()
+    if not numeric.eq(rounded).all():
+        return False
+
+    return True
+
+
+def _is_constant_series(series: pd.Series) -> bool:
+    return series.dropna().nunique(dropna=True) <= 1
+
+
+def _looks_like_discrete_numeric_target(series: pd.Series) -> bool:
+    unique_count = int(series.nunique(dropna=True))
+    if unique_count <= 2:
+        return True
+    return unique_count <= 10 and series.dropna().round().nunique(dropna=True) <= 10
+
+
+def _looks_like_continuous_numeric_target(series: pd.Series) -> bool:
+    unique_count = int(series.nunique(dropna=True))
+    return unique_count > 10 and series.dropna().std(ddof=0) > 0

@@ -33,6 +33,55 @@ def remove_duplicates(df: pd.DataFrame, copy_df: bool = True):
     return cleaned_df, preprocessing_info
 
 
+def normalize_missing_markers(df: pd.DataFrame, copy_df: bool = True):
+    """Convert common string sentinel values to proper pandas missing values."""
+
+    cleaned_df = df.copy() if copy_df else df
+    missing_markers = {
+        "", " ", "nan", "NaN", "N/A", "n/a", "NA", "na",
+        "null", "NULL", "None", "none", "unknown", "Unknown",
+        "?"
+    }
+
+    normalized_count = 0
+
+    for column in cleaned_df.columns:
+        if not pd.api.types.is_object_dtype(cleaned_df[column]) and not pd.api.types.is_string_dtype(cleaned_df[column]):
+            continue
+
+        original_values = cleaned_df[column].copy()
+        cleaned_series = cleaned_df[column].map(
+            lambda value: pd.NA if _is_missing_marker(value) else value
+        )
+        normalized_count += int((cleaned_series.isna() & original_values.notna()).sum())
+        cleaned_df[column] = cleaned_series
+
+    return cleaned_df, {
+        "status": "Completed",
+        "details": {
+            "values_normalized": normalized_count,
+            "markers_used": ["", " ", "?", "NA", "N/A", "na", "null", "unknown"],
+        },
+    }
+
+
+def _is_missing_marker(value):
+    """Return True for common missing-value sentinels while being conservative."""
+
+    if pd.isna(value):
+        return True
+
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned == "":
+            return True
+        return cleaned.lower() in {
+            "na", "n/a", "null", "none", "unknown", "?"
+        }
+
+    return False
+
+
 def handle_missing_values(df: pd.DataFrame, copy_df: bool = True):
     """
     Fill missing values.
@@ -84,41 +133,70 @@ def _get_datetime_columns(df: pd.DataFrame):
     """
     Return columns that are datetime-like in a DataFrame.
 
-    The helper detects columns that are already datetime dtype and also
-    safely checks object/string columns for date-parsable values.
+    Detection strategy:
+    - Immediately include columns that are already datetime dtype.
+    - For object/string columns, sample up to the first 100 non-null values and
+      attempt to parse them with pandas.to_datetime. The sampler allows a small
+      number of malformed values. If most sampled values are parseable, the
+      column is treated as datetime-like.
+
+    This approach is more tolerant to mixed or noisy date strings while still
+    avoiding false positives on arbitrary text columns.
     """
 
     datetime_columns = []
+    sample_limit = 100
+    parse_threshold = 0.8  # require at least 80% of sampled values to parse
 
     for column in df.columns:
         series = df[column]
 
+        # Already a datetime dtype -> include
         if pd.api.types.is_datetime64_any_dtype(series):
             datetime_columns.append(column)
             continue
 
-        if (
-            pd.api.types.is_object_dtype(series)
-            or pd.api.types.is_string_dtype(series)
-        ):
-            non_null_values = series.dropna()
-            if non_null_values.empty:
-                continue
+        # Only consider object/string columns for sampling-based detection
+        if not (pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)):
+            continue
 
-            try:
-                with warnings.catch_warnings():
-                    warnings.filterwarnings(
-                        "ignore",
-                        message="Could not infer format, so each element will be parsed individually"
-                    )
-                    pd.to_datetime(
-                        non_null_values,
-                        errors="raise",
-                        dayfirst=True
-                    )
-                datetime_columns.append(column)
-            except (ValueError, TypeError, OverflowError):
-                continue
+        non_null_values = series.dropna()
+        if non_null_values.empty:
+            continue
+
+        # Sample up to the first N non-null values to limit cost and keep behavior deterministic
+        sample = non_null_values.iloc[:sample_limit]
+
+        # Try parsing without forcing dayfirst; let pandas infer formats
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Could not infer format, so each element will be parsed individually"
+            )
+            parsed_default = pd.to_datetime(sample, errors="coerce")
+
+        parsed_count_default = int(parsed_default.notna().sum())
+        parsed_ratio_default = parsed_count_default / float(len(sample)) if len(sample) else 0.0
+
+        # If default parsing already parses most samples, accept column
+        if parsed_ratio_default >= parse_threshold:
+            datetime_columns.append(column)
+            continue
+
+        # Otherwise, try the alternative dayfirst=True parsing as a fallback
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Could not infer format, so each element will be parsed individually"
+            )
+            parsed_dayfirst = pd.to_datetime(sample, errors="coerce", dayfirst=True)
+
+        parsed_count_dayfirst = int(parsed_dayfirst.notna().sum())
+        parsed_ratio_dayfirst = parsed_count_dayfirst / float(len(sample)) if len(sample) else 0.0
+
+        # Accept if either strategy yields a sufficiently high parsing ratio
+        if max(parsed_ratio_default, parsed_ratio_dayfirst) >= parse_threshold:
+            datetime_columns.append(column)
 
     return datetime_columns
 
@@ -138,23 +216,46 @@ def convert_date_columns(df: pd.DataFrame, copy_df: bool = True):
 
     for column in date_columns:
         try:
+            # First, attempt natural inference without forcing dayfirst
             with warnings.catch_warnings():
                 warnings.filterwarnings(
                     "ignore",
                     message="Could not infer format, so each element will be parsed individually"
                 )
-                cleaned_df[column] = pd.to_datetime(
-                    cleaned_df[column],
-                    errors="coerce",
-                    dayfirst=True
+                parsed_default = pd.to_datetime(
+                                    cleaned_df[column],
+                                    errors="coerce",
+                                )
+
+            # If default parsing yields meaningful non-null values, accept it
+            if parsed_default.notna().any():
+                cleaned_df[column] = parsed_default
+                nat_count = int(cleaned_df[column].isna().sum())
+                total_nat_count += nat_count
+                converted_columns.append(column)
+                continue
+
+            # Fallback: try dayfirst=True if default parsing parsed almost nothing
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="Could not infer format, so each element will be parsed individually"
                 )
+                parsed_dayfirst = pd.to_datetime(
+                                    cleaned_df[column],
+                                    errors="coerce",
+                                    dayfirst=True
+                                )
 
-            nat_count = int(cleaned_df[column].isna().sum())
-            total_nat_count += nat_count
-
-            if cleaned_df[column].notna().any():
+            if parsed_dayfirst.notna().any():
+                cleaned_df[column] = parsed_dayfirst
+                nat_count = int(cleaned_df[column].isna().sum())
+                total_nat_count += nat_count
                 converted_columns.append(column)
             else:
+                # Track NaT count even when conversion fails
+                nat_count = int(parsed_dayfirst.isna().sum())
+                total_nat_count += nat_count
                 failed_columns.append(
                     {
                         "column": column,
@@ -231,11 +332,32 @@ def extract_date_features(df: pd.DataFrame, copy_df: bool = True):
                     "ignore",
                     message="Could not infer format, so each element will be parsed individually"
                 )
-                date_series = pd.to_datetime(
-                    date_series,
-                    errors="coerce",
-                    dayfirst=True
-                )
+                # Let pandas infer formats naturally first
+                parsed_default = pd.to_datetime(
+                                    date_series,
+                                    errors="coerce",
+                                )
+
+            if parsed_default.notna().any():
+                date_series = parsed_default
+            else:
+                # Fallback to dayfirst=True only if default parsing yielded almost nothing
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message="Could not infer format, so each element will be parsed individually"
+                    )
+                    parsed_dayfirst = pd.to_datetime(
+                                            date_series,
+                                            errors="coerce",
+                                            dayfirst=True,
+                                        )
+
+                if parsed_dayfirst.notna().any():
+                    date_series = parsed_dayfirst
+                else:
+                    # Keep the default parsed series (likely all NaT) to preserve behavior
+                    date_series = parsed_default
 
         updated_df[year_col] = date_series.dt.year
         updated_df[month_col] = date_series.dt.month
@@ -353,6 +475,9 @@ def preprocess_dataset(df: pd.DataFrame):
 
     working_df, duplicate_report = remove_duplicates(working_df, copy_df=False)
     preprocessing_report["duplicates"] = duplicate_report
+
+    working_df, missing_normalization_report = normalize_missing_markers(working_df, copy_df=False)
+    preprocessing_report["missing_value_normalization"] = missing_normalization_report
 
     working_df, missing_report = handle_missing_values(working_df, copy_df=False)
     preprocessing_report["missing_values"] = missing_report

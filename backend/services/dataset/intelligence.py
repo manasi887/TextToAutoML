@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from typing import Dict, List, Optional
 
@@ -13,12 +14,7 @@ TASK_TYPE_UNKNOWN = "unknown"
 
 
 def summarize_dataset(df: pd.DataFrame) -> Dict[str, object]:
-    """
-    Return a high-level summary of the dataset.
-
-    The summary includes row and column counts, missing value totals,
-    column dtype counts, and the number of datetime-like columns.
-    """
+    """Return a high-level summary of the dataset."""
 
     column_types = df.dtypes.astype(str).value_counts().to_dict()
     missing_values = int(df.isnull().sum().sum())
@@ -35,23 +31,18 @@ def summarize_dataset(df: pd.DataFrame) -> Dict[str, object]:
 
 
 def analyze_features(df: pd.DataFrame) -> Dict[str, object]:
-    """
-    Analyze features and return metadata useful for preprocessing.
-    """
+    """Analyze features and return metadata useful for preprocessing."""
 
     numeric_columns = df.select_dtypes(include=["number"]).columns.tolist()
     categorical_columns = df.select_dtypes(
         include=["object", "string", "category"]
     ).columns.tolist()
     constant_columns = [
-        column
-        for column in df.columns
-        if _is_constant_column(df[column])
+        column for column in df.columns if _is_constant_column(df[column])
     ]
+    high_cardinality_report = detect_high_cardinality(df, threshold=0.5)
     high_cardinality_columns = [
-        column
-        for column in categorical_columns
-        if df[column].nunique(dropna=False) > 50
+        item["column"] for item in high_cardinality_report["high_cardinality_columns"]
     ]
 
     return {
@@ -59,6 +50,7 @@ def analyze_features(df: pd.DataFrame) -> Dict[str, object]:
         "categorical_columns": categorical_columns,
         "constant_columns": constant_columns,
         "high_cardinality_columns": high_cardinality_columns,
+        "high_cardinality_details": high_cardinality_report["high_cardinality_columns"],
         "numeric_column_count": len(numeric_columns),
         "categorical_column_count": len(categorical_columns),
         "constant_column_count": len(constant_columns),
@@ -67,18 +59,10 @@ def analyze_features(df: pd.DataFrame) -> Dict[str, object]:
 
 
 def detect_constant_columns(df: pd.DataFrame) -> Dict[str, object]:
-    """
-    Detect columns where every non-null value is identical.
-
-    Constant columns provide no predictive power and should usually be
-    removed before training. NaN values are ignored when determining
-    whether a column contains a single repeating value.
-    """
+    """Detect columns where every non-null value is identical."""
 
     constant_columns = [
-        column
-        for column in df.columns
-        if _is_constant_column(df[column])
+        column for column in df.columns if _is_constant_column(df[column])
     ]
 
     return {
@@ -89,29 +73,23 @@ def detect_constant_columns(df: pd.DataFrame) -> Dict[str, object]:
 
 
 def detect_identifier_columns(df: pd.DataFrame) -> Dict[str, object]:
-    """
-    Detect columns that are likely identifiers and should not be used as features.
-
-    Detection uses column name heuristics and data characteristics to
-    identify common identifier columns such as Order ID, Customer ID,
-    Product ID, and Invoice ID.
-    """
+    """Detect likely identifier columns using name and data-based signals."""
 
     identifier_columns: List[str] = []
+    metadata: Dict[str, Dict[str, object]] = {}
     row_count = len(df)
 
     for column in df.columns:
-        if _matches_identifier_name(column):
+        detection = _evaluate_identifier_column(df[column], column, row_count)
+        if detection["is_identifier"]:
             identifier_columns.append(column)
-            continue
-
-        if _matches_identifier_data(df[column], column, row_count):
-            identifier_columns.append(column)
+            metadata[column] = detection["details"]
 
     return {
         "status": "Completed",
         "identifier_columns": identifier_columns,
         "count": len(identifier_columns),
+        "details": metadata,
     }
 
 
@@ -119,12 +97,7 @@ def detect_high_cardinality(
     df: pd.DataFrame,
     threshold: float = 0.5,
 ) -> Dict[str, object]:
-    """
-    Detect categorical columns with too many unique values.
-
-    High-cardinality categorical columns often create many encoding
-    dimensions, which can increase model complexity and overfitting risk.
-    """
+    """Detect high-cardinality categorical columns with dataset-size-aware thresholds."""
 
     if threshold <= 0 or threshold > 1:
         raise ValueError("threshold must be a float between 0 and 1.")
@@ -136,16 +109,25 @@ def detect_high_cardinality(
     high_cardinality_columns = []
 
     for column in candidate_columns:
-        non_null_values = df[column].dropna()
-        unique_count = int(non_null_values.nunique(dropna=True))
-        unique_percentage = float(unique_count / row_count) if row_count else 0.0
+        series = df[column]
+        non_null_values = series.dropna()
+        if non_null_values.empty:
+            continue
 
-        if unique_percentage >= threshold:
+        unique_count = int(non_null_values.nunique(dropna=True))
+        unique_ratio = float(unique_count / row_count) if row_count else 0.0
+        threshold_count = max(20, int(math.ceil(row_count * threshold)))
+
+        if unique_count >= threshold_count or unique_ratio >= threshold:
             high_cardinality_columns.append(
                 {
                     "column": column,
-                    "unique_values": unique_count,
-                    "unique_percentage": unique_percentage,
+                    "unique_count": unique_count,
+                    "unique_ratio": round(unique_ratio, 4),
+                    "threshold_used": round(threshold, 4),
+                    "threshold_count": threshold_count,
+                    "dtype": str(series.dtype),
+                    "reason": "High ratio of unique values relative to dataset size.",
                 }
             )
 
@@ -160,13 +142,7 @@ def generate_dataset_recommendations(
     df: pd.DataFrame,
     high_cardinality_threshold: float = 0.5,
 ) -> Dict[str, object]:
-    """
-    Generate a dataset intelligence report with actionable recommendations.
-
-    The function combines identifier, constant, and high-cardinality
-    detection and generates recommendations dynamically based on the
-    detected issues.
-    """
+    """Generate a dataset intelligence report with actionable recommendations."""
 
     identifier_report = detect_identifier_columns(df)
     constant_report = detect_constant_columns(df)
@@ -212,9 +188,7 @@ def generate_dataset_recommendations(
 
 
 def analyze_target(df: pd.DataFrame, target_column: str) -> Dict[str, object]:
-    """
-    Analyze a target column and infer the problem type.
-    """
+    """Analyze a target column and infer the problem type."""
 
     if target_column not in df.columns:
         raise ValueError(f"Target column '{target_column}' not found in dataset.")
@@ -239,9 +213,7 @@ def analyze_target(df: pd.DataFrame, target_column: str) -> Dict[str, object]:
 
 
 def recommend_model_family(df: pd.DataFrame, target_column: Optional[str] = None) -> Dict[str, object]:
-    """
-    Recommend a model family based on dataset characteristics.
-    """
+    """Recommend a model family based on dataset characteristics."""
 
     if target_column is None:
         return {
@@ -355,18 +327,23 @@ def _infer_problem_type(series: pd.Series) -> str:
 
 
 def _matches_identifier_name(column_name: str) -> bool:
-    """
-    Use column name heuristics to identify likely identifier columns.
-    """
+    """Use name heuristics to detect obvious identifier-like fields."""
 
     normalized = re.sub(r"[^a-z0-9]+", " ", column_name.lower()).strip()
     if not normalized:
         return False
 
+    if _looks_like_measurement_column(normalized):
+        return False
+
+    if "postal" in normalized or "zip" in normalized:
+        return False
+
     identifier_patterns = [
-        r"\b(?:row|order|customer|product|employee|transaction|invoice|ticket|shipment)\b.*\b(?:id|number|key)\b",
-        r"\b(?:id|identifier|key)\b",
-        r"\b(?:order|customer|product|employee|transaction|invoice|ticket|shipment)\b.*\b(?:id|number)\b",
+        r"(?:row|order|customer|user|account|employee|transaction|invoice|ticket|shipment|session|product)[ _-]?(?:id|identifier|number|key|code)",
+        r"(?:row|order|customer|user|account|employee|transaction|invoice|ticket|shipment|session|product)(?:id|identifier|number|key|code)",
+        r"\b(?:id|identifier|uuid|guid)\b",
+        r"(?:customer|user|account|employee|transaction|order|invoice|product)[ _-]?(?:no|num|number|id)",
     ]
 
     return any(re.search(pattern, normalized) for pattern in identifier_patterns)
@@ -377,9 +354,7 @@ def _matches_identifier_data(
     column_name: str,
     row_count: int,
 ) -> bool:
-    """
-    Use data characteristics to identify likely identifier columns.
-    """
+    """Use uniqueness and key-like data patterns to detect identifiers."""
 
     if pd.api.types.is_datetime64_any_dtype(series):
         return False
@@ -388,22 +363,97 @@ def _matches_identifier_data(
     if non_null_series.empty:
         return False
 
-    unique_count = non_null_series.nunique(dropna=True)
-    unique_ratio = unique_count / row_count if row_count else 0
-    null_ratio = 1 - len(non_null_series) / row_count if row_count else 1
+    unique_count = int(non_null_series.nunique(dropna=True))
+    unique_ratio = unique_count / row_count if row_count else 0.0
+    null_ratio = 1 - (len(non_null_series) / row_count) if row_count else 1.0
 
     if unique_count < 10 or unique_ratio < 0.8 or null_ratio > 0.1:
         return False
 
     normalized = re.sub(r"[^a-z0-9]+", " ", column_name.lower()).strip()
-    if not re.search(r"\b(?:id|number|code|key)\b", normalized):
+    if _looks_like_measurement_column(normalized):
+        return False
+    if "postal" in normalized or "zip" in normalized:
+        return False
+    if not re.search(r"\b(?:id|number|key|user|customer|account|employee|transaction|row|product|order)\b", normalized):
         return False
 
     sample = non_null_series.astype(str).head(50)
-    if not sample.str.fullmatch(r"[A-Za-z0-9_-]+").all():
+    if sample.empty:
+        return False
+
+    key_like = sample.str.fullmatch(r"[A-Za-z0-9_-]+", na=False)
+    if len(key_like) and not key_like.all():
         return False
 
     return True
+
+
+def _evaluate_identifier_column(
+    series: pd.Series,
+    column_name: str,
+    row_count: int,
+) -> Dict[str, object]:
+    """Evaluate one column for identifier-likeness and return reasons."""
+
+    details: Dict[str, object] = {
+        "column": column_name,
+        "unique_count": 0,
+        "unique_ratio": 0.0,
+        "null_ratio": 0.0,
+        "reasons": [],
+    }
+
+    if series.empty or pd.api.types.is_datetime64_any_dtype(series):
+        return {"is_identifier": False, "details": details}
+
+    normalized = re.sub(r"[^a-z0-9]+", " ", str(column_name).lower()).strip()
+    if _looks_like_measurement_column(normalized):
+        details["reasons"].append("measurement_column")
+        return {"is_identifier": False, "details": details}
+    if "postal" in normalized or "zip" in normalized:
+        details["reasons"].append("postal_code")
+        return {"is_identifier": False, "details": details}
+
+    non_null_series = series.dropna()
+    if non_null_series.empty:
+        return {"is_identifier": False, "details": details}
+
+    unique_count = int(non_null_series.nunique(dropna=True))
+    unique_ratio = float(unique_count / row_count) if row_count else 0.0
+    null_ratio = float((len(series) - len(non_null_series)) / row_count) if row_count else 0.0
+
+    details["unique_count"] = unique_count
+    details["unique_ratio"] = round(unique_ratio, 4)
+    details["null_ratio"] = round(null_ratio, 4)
+
+    if _matches_identifier_name(column_name):
+        details["reasons"].append("name_pattern")
+
+    if unique_count >= 10 and unique_ratio >= 0.8:
+        details["reasons"].append("near_unique")
+
+    if _matches_identifier_data(series, column_name, row_count):
+        details["reasons"].append("data_pattern")
+
+    is_identifier = bool(details["reasons"]) and (unique_ratio >= 0.8 or unique_count >= 10)
+    return {"is_identifier": is_identifier, "details": details}
+
+
+def _looks_like_measurement_column(column_name: str) -> bool:
+    """Return True for ordinary measurements that should not be treated as identifiers."""
+
+    normalized = re.sub(r"[^a-z0-9]+", " ", str(column_name).lower()).strip()
+    if not normalized:
+        return False
+
+    measurement_tokens = {
+        "salary", "estimatedsalary", "income", "age", "balance", "score",
+        "height", "weight", "amount", "price", "cost", "total", "value",
+        "quantity", "duration", "time", "distance", "percent", "ratio",
+    }
+
+    return any(token in normalized for token in measurement_tokens)
 
 
 def _get_model_recommendation(task_type: str) -> str:
