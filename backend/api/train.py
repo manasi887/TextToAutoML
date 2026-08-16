@@ -75,6 +75,7 @@ def _serialize_training_result(payload: dict[str, Any]) -> dict[str, Any]:
         "models": _to_json_safe(payload.get("models", {})),
         "evaluation": _to_json_safe(payload.get("evaluation", {})),
         "best_model": _to_json_safe(payload.get("best_model", {})),
+        "model": _to_json_safe(payload.get("model", {})),
     }
 
     if isinstance(result["preprocessing"], dict):
@@ -107,6 +108,17 @@ def _serialize_training_result(payload: dict[str, Any]) -> dict[str, Any]:
             "status": evaluation.get("status"),
             "results": safe_results,
             "errors": evaluation.get("errors", []),
+        }
+
+    if isinstance(result["model"], dict):
+        model_payload = result["model"]
+        result["model"] = {
+            "model_id": model_payload.get("model_id"),
+            "name": model_payload.get("name"),
+            "problem_type": model_payload.get("problem_type"),
+            "target_column": model_payload.get("target_column"),
+            "selection_metric": model_payload.get("selection_metric"),
+            "metrics": model_payload.get("metrics", {}),
         }
 
     return result

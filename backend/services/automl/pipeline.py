@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
+from services.automl.persistence import save_model_package
 from services.automl.problem_detection import detect_problem_type
 from services.automl.trainer import prepare_training_data, split_dataset
 from services.automl.training import evaluate_models, select_best_model, train_models
@@ -220,6 +221,22 @@ def run_automl_pipeline(
     else:
         selection_metric = "f1_score"
 
+    packaged_model = save_model_package(
+        model=best_model,
+        encoders=encoders,
+        feature_names=feature_names,
+        target_column=target_column,
+        problem_type=normalized_problem_type,
+        preprocessing={
+            **preparation.get("preprocessing", {}),
+            "feature_names": feature_names,
+            "encoders": encoders,
+        },
+        model_name=best_name,
+        selection_metric=selection_metric,
+        metrics=metrics,
+    )
+
     return {
         "status": "success",
         "target_column": target_column,
@@ -250,6 +267,14 @@ def run_automl_pipeline(
             "selection_metric": selection_metric,
             "metrics": metrics,
             "reason": reason,
+        },
+        "model": {
+            "model_id": packaged_model["model_id"],
+            "name": packaged_model["model_name"],
+            "problem_type": packaged_model["problem_type"],
+            "target_column": packaged_model["target_column"],
+            "selection_metric": packaged_model["selection_metric"],
+            "metrics": packaged_model["metrics"],
         },
         "_internal_best_model": best_model,
     }
