@@ -78,6 +78,9 @@ def test_valid_regression_training_request(upload_dir):
     assert payload["problem_type"] == "Regression"
     assert payload["data"]["training_rows"] > 0
     assert payload["best_model"]["name"] is not None
+    assert "model" in payload
+    assert payload["model"]["model_id"]
+    assert payload["model"]["name"] == payload["best_model"]["name"]
 
 
 def test_valid_binary_classification_training_request(upload_dir):
@@ -212,8 +215,10 @@ def test_successful_response_contains_only_json_serializable_fields(upload_dir):
     assert response.status_code == 200
     payload = response.json()
 
-    assert set(payload.keys()) == {"status", "filename", "target_column", "problem_type", "data", "preprocessing", "models", "evaluation", "best_model"}
+    assert set(payload.keys()) == {"status", "filename", "target_column", "problem_type", "data", "preprocessing", "models", "evaluation", "best_model", "model"}
     assert isinstance(payload["data"], dict)
     assert isinstance(payload["models"], dict)
     assert isinstance(payload["evaluation"], dict)
     assert isinstance(payload["best_model"], dict)
+    assert isinstance(payload["model"], dict)
+    assert payload["model"]["model_id"]

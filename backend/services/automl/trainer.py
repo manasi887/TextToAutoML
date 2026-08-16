@@ -119,16 +119,23 @@ def prepare_training_data(df: pd.DataFrame, target_column: str) -> Dict[str, obj
       # Simple imputation for remaining missing values
       # Numeric -> mean, Categorical -> mode (or '<missing>' if mode not available)
       numeric_columns = X.select_dtypes(include=["number"]).columns.tolist()
+      numeric_imputation_values: Dict[str, float] = {}
       for col in numeric_columns:
           if X[col].isna().any():
-              X[col] = X[col].fillna(X[col].mean())
+              fill_value = float(X[col].mean())
+              X[col] = X[col].fillna(fill_value)
+              numeric_imputation_values[col] = fill_value
 
       categorical_columns = X.select_dtypes(include=["object", "string", "category"]).columns.tolist()
+      categorical_imputation_values: Dict[str, Any] = {}
       for col in categorical_columns:
           if X[col].isna().any():
               mode_vals = X[col].mode(dropna=True)
               fill_value = mode_vals.iloc[0] if not mode_vals.empty else "<missing>"
               X[col] = X[col].fillna(fill_value)
+              categorical_imputation_values[col] = fill_value
+
+      raw_feature_names = X.columns.tolist()
 
       # Encode categorical features and collect encoders
       encoded_X, encoders = encode_features(X)
@@ -155,6 +162,11 @@ def prepare_training_data(df: pd.DataFrame, target_column: str) -> Dict[str, obj
           "imputed_columns": {
               "numeric": numeric_columns,
               "categorical": categorical_columns,
+          },
+          "raw_feature_names": raw_feature_names,
+          "imputation_values": {
+              "numeric": numeric_imputation_values,
+              "categorical": categorical_imputation_values,
           },
           "target_column": target_column,
           "target_dtype": target_dtype,

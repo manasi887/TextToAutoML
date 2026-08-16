@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from api.predict import router as predict_router
 from api.upload import router as upload_router
 from api.train import router as train_router
 
@@ -11,6 +12,7 @@ app = FastAPI(
 # Register API routes
 app.include_router(upload_router)
 app.include_router(train_router)
+app.include_router(predict_router)
 
 
 @app.get("/")
