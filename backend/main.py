@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from api.predict import router as predict_router
 from api.upload import router as upload_router
 from api.train import router as train_router
+from api.nlp import router as nlp_router
 
 app = FastAPI(
     title="TextToAutoML API",
@@ -13,6 +14,7 @@ app = FastAPI(
 app.include_router(upload_router)
 app.include_router(train_router)
 app.include_router(predict_router)
+app.include_router(nlp_router)
 
 
 @app.get("/")

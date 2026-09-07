@@ -1,31 +1,14 @@
-# ============================
-# Python
-# ============================
+﻿.venv/
 __pycache__/
-*.py[cod]
-*$py.class
-
-# Virtual Environment
-venv/
-
-# Environment Variables
-.env
-
-# VS Code
-.vscode/
-
-# Logs
-*.log
-
-# Python Cache
+*.pyc
+*.pyo
+*.pyd
 .pytest_cache/
+.mypy_cache/
+.vscode/
+storage/uploads/
+storage/models/
+storage/reports/
 
-# Storage (Generated Files)
-backend/storage/uploads/*
-backend/storage/models/*
-backend/storage/reports/*
-
-# Keep empty folders
-!backend/storage/uploads/.gitkeep
-!backend/storage/models/.gitkeep
-!backend/storage/reports/.gitkeep
+backend/venv/
+backend/storage/

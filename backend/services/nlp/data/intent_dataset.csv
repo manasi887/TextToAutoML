@@ -1,0 +1,201 @@
+text,intent
+Will my customers leave us?,classification
+I want to predict if a customer will churn,classification
+Determine whether a transaction is fraudulent,classification
+Can you help me identify fraud in transactions?,classification
+Predict who will respond to our marketing campaign,classification
+Predict which customers will respond to our marketing campaign.,classification
+Identify which loans will default,classification
+Does a patient have heart disease?,classification
+Predict employee attrition,classification
+Will this employee stay with the company?,classification
+Detect spam emails,classification
+Is this email spam?,classification
+Predict which students will drop out,classification
+Does this customer have a high risk profile?,classification
+I want to know if a credit application will be approved,classification
+Approve or reject this loan application,classification
+Categorize this email,classification
+Label each product category,classification
+Which customers will churn in the next quarter?,classification
+Identify high-risk customers,classification
+Predict if someone will buy our product,classification
+Will the customer convert?,classification
+Forecast customer lifetime value categories,classification
+Tag these news articles by topic,classification
+Classify customer complaints,classification
+Predict product purchase intent,classification
+Does this customer have a disease?,classification
+Determine if a bank transfer is legitimate,classification
+Categorize incoming support tickets,classification
+Predict customer satisfaction level category,classification
+Will this deal close?,classification
+Identify potentially fraudulent accounts,classification
+Does this person qualify for the loan?,classification
+Predict who will renew their subscription,classification
+Classify tweets as positive or negative,classification
+Predict if this person will click the ad,classification
+Determine the sentiment of customer reviews,classification
+Will this transaction fail?,classification
+Predict if an employee will quit,classification
+Classify images by object type,classification
+Does the house have structural damage?,classification
+Identify faulty products,classification
+Predict if a startup will succeed,classification
+Will this student pass the exam?,classification
+Classify documents by topic,classification
+Predict if a credit card transaction is fraudulent,classification
+Is this a human or a bot?,classification
+Determine customer loyalty status,classification
+Predict readmission likelihood for hospitals,classification
+What will be the house price?,regression
+Estimate the sale price of this house,regression
+I want to predict real estate values,regression
+How much will this property sell for?,regression
+Forecast next month's sales,regression
+What are the projected sales for Q3?,regression
+Predict revenue for next year,regression
+Estimate annual revenue,regression
+What will the salary be for this role?,regression
+Predict employee salary,regression
+How many units will we sell next month?,regression
+Forecast customer demand,regression
+How long will delivery take?,regression
+Estimate delivery time,regression
+Predict how fast our service will be,regression
+What temperature will it be tomorrow?,regression
+Predict tomorrow's temperature.,regression
+Predict customer lifetime value,regression
+What is the customer's lifetime value?,regression
+Estimate the cost of repairs,regression
+Predict repair costs,regression
+How many users will sign up next quarter?,regression
+Forecast user growth,regression
+What will the stock price be?,regression
+Predict stock price movements,regression
+Estimate project completion time,regression
+Predict project duration,regression
+What is the expected ROI?,regression
+Forecast return on investment,regression
+Predict energy consumption,regression
+How much electricity will we use?,regression
+Estimate bandwidth requirements,regression
+Forecast data usage,regression
+What will the unemployment rate be?,regression
+Predict inflation rate,regression
+Estimate product demand in different regions,regression
+Forecast seasonal demand,regression
+Predict the number of website visitors next month.,regression
+Predict page views,regression
+Estimate customer acquisition cost,regression
+Predict our customer acquisition cost next quarter.,regression
+How many support tickets will we receive?,regression
+Predict ticket volume,regression
+What will be the average response time?,regression
+Forecast response time metrics,regression
+Estimate the number of concurrent users,regression
+Predict server load,regression
+How long until a hard drive fails?,regression
+Predict equipment lifespan,regression
+I want to group my customers,clustering
+Segment customers by behavior,clustering
+Find groups of similar customers,clustering
+Divide customers into segments,clustering
+Identify customer clusters,clustering
+What customer segments exist in my data?,clustering
+Group products by similarity,clustering
+Find related products,clustering
+Cluster products together,clustering
+I want to identify natural groupings,clustering
+Find groups of similar items,clustering
+Segment my user base,clustering
+Divide users into groups,clustering
+What user segments do we have?,clustering
+Group transactions by pattern,clustering
+Find similar transactions,clustering
+Identify transaction clusters,clustering
+Segment the market,clustering
+What market segments exist?,clustering
+Group suppliers by characteristics,clustering
+Divide suppliers into categories,clustering
+Identify similar suppliers,clustering
+Segment patients by condition,clustering
+Group patients with similar symptoms,clustering
+Find patient clusters,clustering
+Divide our data into logical groups,clustering
+Create natural groupings from our data,clustering
+Group customers with similar purchasing behavior.,clustering
+What natural groups are in this dataset?,clustering
+Identify communities in social networks,clustering
+Find user communities,clustering
+Cluster social media users,clustering
+Segment email subscribers,clustering
+Group subscribers by engagement,clustering
+Find email user clusters,clustering
+Divide products into categories based on features,clustering
+Group by product features,clustering
+Cluster products by characteristics,clustering
+Segment employees by department,clustering
+Group employees by role,clustering
+Identify employee clusters,clustering
+Find related documents,clustering
+Group documents by content similarity,clustering
+Cluster documents,clustering
+Segment survey respondents,clustering
+Group respondents by answers,clustering
+Find respondent clusters,clustering
+What are the natural groupings in this data?,clustering
+I have sales data and some customer info,unknown
+What should I do with this dataset?,unknown
+Can you analyze this data?,unknown
+I have some numbers and I'm not sure what to do with them,unknown
+What's in this data?,unknown
+How should I use this information?,unknown
+What patterns might exist here?,unknown
+Do you see anything interesting in this data?,unknown
+I collected some data but don't know the goal,unknown
+What insights can you find?,unknown
+Analyze this dataset,unknown
+What can you tell me about this data?,unknown
+I want to understand this data better,unknown
+Look at this information for me,unknown
+Extract insights from this dataset,unknown
+What should I do with these numbers?,unknown
+Can you explore this data?,unknown
+What patterns are there?,unknown
+Find something useful in this data,unknown
+I'm not sure what I'm looking for,unknown
+What should I predict with this?,unknown
+How can I use this data?,unknown
+What would be useful to know?,unknown
+Explore this dataset,unknown
+Give me some insights,unknown
+What can we learn from this?,unknown
+What's important in this data?,unknown
+Help me understand this dataset,unknown
+What's worth predicting here?,unknown
+What's interesting in this data?,unknown
+What can we do with this data?,unknown
+Analyze and report on this data,unknown
+Find the most important patterns,unknown
+What relationships exist here?,unknown
+What story does this data tell?,unknown
+How are these variables related?,unknown
+What would be most valuable to predict?,unknown
+I have data from different departments,unknown
+What would be useful to forecast?,unknown
+We collected this but need guidance,unknown
+What's the best use of this information?,unknown
+Discover what's in this data,unknown
+Tell me what you find,unknown
+What opportunities exist here?,unknown
+What should we focus on?,unknown
+How do we get value from this?,unknown
+We're not sure what question to answer,unknown
+Is this image a cat or a dog?,classification
+Group customers by purchasing patterns,clustering
+Estimate manufacturing costs,regression
+I have data but I need advice,unknown
+What should our next step be?,unknown
+How do we extract value from this?,unknown
+Group users with similar behavioral patterns.,clustering
