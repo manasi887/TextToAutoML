@@ -91,15 +91,22 @@ def generate_training_report(
     dataset = automl_training.get("data")
     if not isinstance(dataset, dict):
         dataset = {}
+    preprocessing = automl_training.get("preprocessing")
+    if not isinstance(preprocessing, dict):
+        preprocessing = {}
     models = automl_training.get("models")
     if not isinstance(models, dict):
         models = {}
     best_model = automl_training.get("best_model")
     if not isinstance(best_model, dict):
         best_model = {}
+    model = automl_training.get("model")
+    if not isinstance(model, dict):
+        model = {}
 
     trained = _list_value(models.get("trained"))
     failed = _list_value(models.get("failed"))
+    raw_feature_names = _list_value(preprocessing.get("raw_feature_names"))
     best_name = best_model.get("name")
     selection_metric = best_model.get("selection_metric")
     if best_name is not None:
@@ -113,13 +120,14 @@ def generate_training_report(
             best_name,
             selection_metric,
         ),
+        "model_id": _json_safe(model.get("model_id")),
         "task": {
             "target": _json_safe(target_column),
             "problem_type": problem_type,
         },
         "dataset": {
             "rows": _non_negative_int(dataset.get("original_rows")),
-            "features": _non_negative_int(dataset.get("feature_count")),
+            "features": len(raw_feature_names),
             "training_rows": _non_negative_int(dataset.get("training_rows")),
             "test_rows": _non_negative_int(dataset.get("test_rows")),
         },
@@ -133,6 +141,9 @@ def generate_training_report(
             "metrics": _json_safe(best_model.get("metrics", {}))
             if isinstance(best_model.get("metrics", {}), dict)
             else {},
+        },
+        "warnings": {
+            "failed_model_count": len(failed),
         },
     }
     return _json_safe(report)
