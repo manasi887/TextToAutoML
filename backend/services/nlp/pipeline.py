@@ -5,6 +5,7 @@ from typing import Any
 import pandas as pd
 
 from .clarification import analyze_intent_confidence
+from .dataset_resolution import resolve_dataset_context
 from .intent_detection import detect_user_intent
 from .target_extraction import extract_target_reference
 from .target_matching import match_target_column
@@ -49,6 +50,27 @@ def process_nlp_request(user_text: str, df: pd.DataFrame) -> dict[str, Any]:
         or target_needs_clarification
     )
 
+    dataset_resolution = resolve_dataset_context(
+        {
+            "intent": intent_result,
+            "task": {
+                "problem_type": task_result["problem_type"],
+                "clarification_required": task_result["clarification_required"],
+            },
+            "target": target_result,
+            "needs_clarification": needs_clarification,
+        },
+        df,
+    )
+    needs_clarification = bool(dataset_resolution["needs_clarification"])
+    ready_for_training = bool(
+        not needs_clarification
+        and (
+            dataset_resolution["problem_type"] == "Clustering"
+            or dataset_resolution["target_column"] is not None
+        )
+    )
+
     return {
         "user_text": user_text,
         "intent": intent_result,
@@ -58,5 +80,7 @@ def process_nlp_request(user_text: str, df: pd.DataFrame) -> dict[str, Any]:
             "clarification_required": task_result["clarification_required"],
         },
         "target": target_result,
+        "dataset_resolution": dataset_resolution,
         "needs_clarification": needs_clarification,
+        "ready_for_training": ready_for_training,
     }
