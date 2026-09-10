@@ -45,24 +45,32 @@ class NlpApiTests(unittest.TestCase):
         }
         integration_result = {
             "nlp_resolution": nlp_result["dataset_resolution"],
-            "automl_training": {"status": "Completed"},
+            "automl_training": {"status": "success"},
             "ready_for_training": True,
         }
+        report = {"summary": "Classification training completed."}
 
         with patch(
             "api.nlp.process_nlp_request", return_value=nlp_result
         ) as process_mock, patch(
             "api.nlp.integrate_nlp_with_automl", return_value=integration_result
-        ) as integrate_mock:
+        ) as integrate_mock, patch(
+            "api.nlp.generate_training_report", return_value=report
+        ) as report_mock:
             response = self.client.post(
                 "/nlp/train",
                 json={"filename": dataset_name, "text": "Predict the target"},
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), integration_result)
+        expected_response = {**integration_result, "report": report}
+        self.assertEqual(response.json(), expected_response)
         process_mock.assert_called_once()
         integrate_mock.assert_called_once()
+        report_mock.assert_called_once_with(
+            integration_result["nlp_resolution"],
+            integration_result["automl_training"],
+        )
 
     def test_nlp_train_missing_dataset_returns_404(self):
         response = self.client.post(

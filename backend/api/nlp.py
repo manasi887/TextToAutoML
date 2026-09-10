@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from services.dataset.loader import load_dataset
 from services.automl.nlp_integration import integrate_nlp_with_automl
+from services.reporting.training_report import generate_training_report
 from services.nlp.pipeline import process_nlp_request
 
 
@@ -103,7 +104,18 @@ async def train_from_nlp_request(request: NLPRequest):
     try:
         df = load_dataset(str(file_path))
         nlp_result = process_nlp_request(request.text, df)
-        return integrate_nlp_with_automl(df, nlp_result)
+        integration_result = integrate_nlp_with_automl(df, nlp_result)
+        automl_training = integration_result.get("automl_training")
+        if (
+            integration_result.get("ready_for_training") is True
+            and isinstance(automl_training, dict)
+            and automl_training.get("status") == "success"
+        ):
+            integration_result["report"] = generate_training_report(
+                integration_result["nlp_resolution"],
+                automl_training,
+            )
+        return integration_result
     except (OSError, TypeError, ValueError) as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
