@@ -24,3 +24,4 @@ scikit-learn==1.5.1
 torch==2.4.1
 transformers==4.43.0
 accelerate==0.31.0
+tensorflow==2.21.0
