@@ -12,3 +12,5 @@ storage/reports/
 
 backend/venv/
 backend/storage/
+node_modules/
+dist/
