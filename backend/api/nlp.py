@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 
 from services.dataset.loader import load_dataset
+from services.automl.nlp_integration import integrate_nlp_with_automl
 from services.nlp.pipeline import process_nlp_request
 
 
@@ -74,4 +75,37 @@ async def analyze_nlp_request(request: NLPRequest):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid NLP request: {exc}",
+        ) from exc
+
+
+@router.post("/train")
+async def train_from_nlp_request(request: NLPRequest):
+    """Resolve a natural-language request and run AutoML when ready."""
+    filename = request.filename
+    if Path(filename).name != filename:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only the uploaded filename itself may be used; directory traversal is not allowed.",
+        )
+
+    file_path = _safe_upload_path(filename)
+    if file_path.suffix.lower() not in {".csv", ".xlsx"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only CSV and Excel files are allowed for NLP training.",
+        )
+    if not file_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Dataset '{filename}' was not found in the uploads directory.",
+        )
+
+    try:
+        df = load_dataset(str(file_path))
+        nlp_result = process_nlp_request(request.text, df)
+        return integrate_nlp_with_automl(df, nlp_result)
+    except (OSError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unable to process NLP training request: {exc}",
         ) from exc
