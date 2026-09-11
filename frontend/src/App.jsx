@@ -25,6 +25,9 @@ export default function App() {
   const [uploadState, setUploadState] = useState("idle");
   const [uploadError, setUploadError] = useState("");
   const [uploadResult, setUploadResult] = useState(null);
+  const [analyzeState, setAnalyzeState] = useState("idle");
+  const [analyzeError, setAnalyzeError] = useState("");
+  const [analyzeResult, setAnalyzeResult] = useState(null);
 
   async function handleFileChange(event) {
     const file = event.target.files?.[0];
@@ -61,6 +64,40 @@ export default function App() {
 
   function useExample() {
     setTask("Predict customer churn");
+  }
+
+  async function handleAnalyze() {
+    if (!fileName || !task.trim()) {
+      setAnalyzeState("error");
+      setAnalyzeError("Choose a dataset and describe the task before analyzing.");
+      setAnalyzeResult(null);
+      return;
+    }
+
+    setAnalyzeState("loading");
+    setAnalyzeError("");
+    setAnalyzeResult(null);
+
+    try {
+      const response = await fetch("/nlp/analyze", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ filename: fileName, text: task.trim() }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload.detail || "Analysis failed.");
+      }
+
+      setAnalyzeResult(payload);
+      setAnalyzeState("success");
+    } catch (error) {
+      setAnalyzeState("error");
+      setAnalyzeError(error.message || "Analysis failed. Please try again.");
+    }
   }
 
   return (
@@ -377,18 +414,20 @@ export default function App() {
         >
           <button
             type="button"
+            onClick={handleAnalyze}
+            disabled={analyzeState === "loading"}
             style={{
               padding: "14px 24px",
               border: 0,
               borderRadius: "6px",
-              background: "#1e6041",
+              background: analyzeState === "loading" ? "#7f9a89" : "#1e6041",
               color: "#ffffff",
-              cursor: "pointer",
+              cursor: analyzeState === "loading" ? "wait" : "pointer",
               font: "600 15px Arial, sans-serif",
               boxShadow: "0 8px 18px rgba(30, 96, 65, 0.2)",
             }}
           >
-            Analyze task
+            {analyzeState === "loading" ? "Analyzing..." : "Analyze task"}
             <span aria-hidden="true" style={{ marginLeft: "10px" }}>
               -&gt;
             </span>
@@ -426,7 +465,11 @@ export default function App() {
                 textTransform: "uppercase",
               }}
             >
-              Awaiting analysis
+              {analyzeResult?.needs_clarification
+                ? "Needs clarification"
+                : analyzeResult
+                  ? "Analysis complete"
+                  : "Awaiting analysis"}
             </span>
           </div>
           <div
@@ -434,7 +477,95 @@ export default function App() {
               minHeight: "150px",
               borderTop: "1px solid #edf2ee",
             }}
-          />
+          >
+            {analyzeState === "error" && (
+              <p
+                style={{
+                  margin: "18px 0 0",
+                  color: "#a13d35",
+                  font: "14px/1.5 Arial, sans-serif",
+                }}
+              >
+                {analyzeError}
+              </p>
+            )}
+            {analyzeState === "success" && analyzeResult?.needs_clarification ? (
+              <div
+                style={{
+                  paddingTop: "18px",
+                  borderTop: "1px solid #edf2ee",
+                  font: "14px/1.5 Arial, sans-serif",
+                }}
+              >
+                <strong style={{ color: "#8c5a16" }}>Needs clarification</strong>
+                <p style={{ margin: "10px 0 0", color: "#526158" }}>
+                  {analyzeResult.intent_analysis?.clarification_reason ||
+                    "Please clarify what you would like to do with this dataset."}
+                </p>
+              </div>
+            ) : analyzeState === "success" && analyzeResult ? (
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+                  gap: "14px 20px",
+                  paddingTop: "18px",
+                  borderTop: "1px solid #edf2ee",
+                  font: "14px/1.5 Arial, sans-serif",
+                }}
+              >
+                <div>
+                  <span style={{ display: "block", color: "#8a988e", fontSize: "12px" }}>
+                    Intent
+                  </span>
+                  <strong>{analyzeResult.intent?.intent || "-"}</strong>
+                </div>
+                <div>
+                  <span style={{ display: "block", color: "#8a988e", fontSize: "12px" }}>
+                    Problem type
+                  </span>
+                  <strong>
+                    {analyzeResult.dataset_resolution?.problem_type || analyzeResult.task?.problem_type || "-"}
+                  </strong>
+                </div>
+                <div>
+                  <span style={{ display: "block", color: "#8a988e", fontSize: "12px" }}>
+                    Target
+                  </span>
+                  <strong>
+                    {analyzeResult.dataset_resolution?.target_column || analyzeResult.target?.matched_column || "None"}
+                  </strong>
+                </div>
+                <div>
+                  <span style={{ display: "block", color: "#8a988e", fontSize: "12px" }}>
+                    Confidence
+                  </span>
+                  <strong>
+                    {analyzeResult.intent?.confidence != null
+                      ? `${Math.round(analyzeResult.intent.confidence * 100)}%`
+                      : "-"}
+                  </strong>
+                </div>
+                <div>
+                  <span style={{ display: "block", color: "#8a988e", fontSize: "12px" }}>
+                    Clarification
+                  </span>
+                  <strong>
+                    {analyzeResult.needs_clarification || analyzeResult.dataset_resolution?.needs_clarification
+                      ? "Needed"
+                      : "Not needed"}
+                  </strong>
+                </div>
+              </div>
+            ) : (
+              <div
+                style={{
+                  minHeight: "150px",
+                  borderTop: "1px solid #edf2ee",
+                }}
+              />
+            )}
+          </div>
         </section>
       </main>
     </div>
