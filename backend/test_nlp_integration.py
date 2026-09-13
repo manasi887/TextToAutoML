@@ -53,13 +53,18 @@ class NlpIntegrationTests(unittest.TestCase):
         with patch(
             "services.automl.nlp_integration.run_automl_pipeline",
             return_value=training_output,
-        ) as run_mock:
+        ) as run_mock, patch(
+            "services.automl.nlp_integration.time.perf_counter",
+            side_effect=[10.0, 12.345],
+        ):
             result = integrate_nlp_with_automl(self.dataframe, nlp_result)
 
         run_mock.assert_called_once_with(
             self.dataframe, "Exited", "Binary Classification"
         )
-        self.assertEqual(result["automl_training"], training_output)
+        self.assertEqual(result["automl_training"]["status"], "Completed")
+        self.assertEqual(result["automl_training"]["score"], 0.91)
+        self.assertEqual(result["automl_training"]["training_time_seconds"], 2.345)
         self.assertEqual(result["nlp_resolution"], self.resolution)
         self.assertFalse(result["needs_clarification"])
 
@@ -94,11 +99,15 @@ class NlpIntegrationTests(unittest.TestCase):
         with patch(
             "services.automl.nlp_integration.run_automl_pipeline",
             return_value=training_output,
+        ), patch(
+            "services.automl.nlp_integration.time.perf_counter",
+            side_effect=[10.0, 10.25],
         ):
             result = integrate_nlp_with_automl(self.dataframe, nlp_result)
 
         self.assertNotIn("_internal_best_model", result["automl_training"])
         self.assertEqual(result["automl_training"]["metrics"]["score"], 0.91)
+        self.assertEqual(result["automl_training"]["training_time_seconds"], 0.25)
         json.dumps(result)
 
 

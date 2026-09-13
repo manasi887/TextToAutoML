@@ -10,6 +10,7 @@ from .intent_detection import detect_user_intent
 from .target_extraction import extract_target_reference
 from .target_matching import match_target_column
 from .task_mapping import map_intent_to_task
+from services.automl.time_estimator import estimate_training_time
 
 
 def process_nlp_request(user_text: str, df: pd.DataFrame) -> dict[str, Any]:
@@ -70,6 +71,16 @@ def process_nlp_request(user_text: str, df: pd.DataFrame) -> dict[str, Any]:
             or dataset_resolution["target_column"] is not None
         )
     )
+    training_time_estimate = None
+    if ready_for_training:
+        target_column = dataset_resolution.get("target_column")
+        feature_frame = df.drop(columns=[target_column], errors="ignore")
+        training_time_estimate = estimate_training_time(
+            rows=len(df),
+            features=len(feature_frame.columns),
+            problem_type=dataset_resolution["problem_type"],
+            model_count=3,
+        )
 
     return {
         "user_text": user_text,
@@ -83,4 +94,5 @@ def process_nlp_request(user_text: str, df: pd.DataFrame) -> dict[str, Any]:
         "dataset_resolution": dataset_resolution,
         "needs_clarification": needs_clarification,
         "ready_for_training": ready_for_training,
+        "training_time_estimate": training_time_estimate,
     }

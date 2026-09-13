@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 from typing import Any
 
 import pandas as pd
@@ -61,7 +62,13 @@ def integrate_nlp_with_automl(
     if not isinstance(problem_type, str) or not problem_type.strip():
         raise ValueError("A resolved problem_type is required for AutoML training")
 
+    training_started_at = time.perf_counter()
     training_output = run_automl_pipeline(df, target_column, problem_type)
+    training_time_seconds = round(time.perf_counter() - training_started_at, 6)
+    training_output = {
+        **training_output,
+        "training_time_seconds": training_time_seconds,
+    }
     return {
         "nlp_resolution": safe_resolution,
         "automl_training": _json_safe(training_output),

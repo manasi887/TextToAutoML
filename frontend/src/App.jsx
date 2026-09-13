@@ -19,6 +19,18 @@ const panelStyle = {
   boxShadow: "0 14px 40px rgba(33, 63, 45, 0.07)",
 };
 
+function formatDuration(seconds) {
+  if (seconds < 60) {
+    return `${Math.round(seconds)} seconds`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = Math.round(seconds % 60);
+  return remainingSeconds
+    ? `${minutes} min ${remainingSeconds} sec`
+    : `${minutes} min`;
+}
+
 export default function App() {
   const [fileName, setFileName] = useState("");
   const [task, setTask] = useState("");
@@ -28,6 +40,10 @@ export default function App() {
   const [analyzeState, setAnalyzeState] = useState("idle");
   const [analyzeError, setAnalyzeError] = useState("");
   const [analyzeResult, setAnalyzeResult] = useState(null);
+  const [trainingConfirmed, setTrainingConfirmed] = useState(false);
+  const [trainingState, setTrainingState] = useState("idle");
+  const [trainingError, setTrainingError] = useState("");
+  const [trainingResult, setTrainingResult] = useState(null);
 
   async function handleFileChange(event) {
     const file = event.target.files?.[0];
@@ -71,12 +87,20 @@ export default function App() {
       setAnalyzeState("error");
       setAnalyzeError("Choose a dataset and describe the task before analyzing.");
       setAnalyzeResult(null);
+      setTrainingConfirmed(false);
+      setTrainingState("idle");
+      setTrainingError("");
+      setTrainingResult(null);
       return;
     }
 
     setAnalyzeState("loading");
     setAnalyzeError("");
     setAnalyzeResult(null);
+    setTrainingConfirmed(false);
+    setTrainingState("idle");
+    setTrainingError("");
+    setTrainingResult(null);
 
     try {
       const response = await fetch("/nlp/analyze", {
@@ -92,11 +116,43 @@ export default function App() {
         throw new Error(payload.detail || "Analysis failed.");
       }
 
+      setTrainingConfirmed(false);
+      setTrainingState("idle");
+      setTrainingError("");
+      setTrainingResult(null);
       setAnalyzeResult(payload);
       setAnalyzeState("success");
     } catch (error) {
       setAnalyzeState("error");
       setAnalyzeError(error.message || "Analysis failed. Please try again.");
+    }
+  }
+
+  async function confirmTraining() {
+    setTrainingState("loading");
+    setTrainingError("");
+    setTrainingResult(null);
+
+    try {
+      const response = await fetch("/nlp/train", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ filename: fileName, text: task.trim() }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload.detail || "Training failed.");
+      }
+
+      setTrainingResult(payload);
+      setTrainingState("success");
+      setTrainingConfirmed(true);
+    } catch (error) {
+      setTrainingState("error");
+      setTrainingError(error.message || "Training failed. Please try again.");
     }
   }
 
@@ -504,39 +560,39 @@ export default function App() {
                 </p>
               </div>
             ) : analyzeState === "success" && analyzeResult ? (
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-                  gap: "14px 20px",
-                  paddingTop: "18px",
-                  borderTop: "1px solid #edf2ee",
-                  font: "14px/1.5 Arial, sans-serif",
-                }}
-              >
-                <div>
+              <div style={{ font: "14px/1.5 Arial, sans-serif" }}>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+                    gap: "14px 20px",
+                    paddingTop: "18px",
+                    borderTop: "1px solid #edf2ee",
+                  }}
+                >
+                  <div>
                   <span style={{ display: "block", color: "#8a988e", fontSize: "12px" }}>
                     Intent
                   </span>
                   <strong>{analyzeResult.intent?.intent || "-"}</strong>
-                </div>
-                <div>
+                  </div>
+                  <div>
                   <span style={{ display: "block", color: "#8a988e", fontSize: "12px" }}>
                     Problem type
                   </span>
                   <strong>
                     {analyzeResult.dataset_resolution?.problem_type || analyzeResult.task?.problem_type || "-"}
                   </strong>
-                </div>
-                <div>
+                  </div>
+                  <div>
                   <span style={{ display: "block", color: "#8a988e", fontSize: "12px" }}>
                     Target
                   </span>
                   <strong>
                     {analyzeResult.dataset_resolution?.target_column || analyzeResult.target?.matched_column || "None"}
                   </strong>
-                </div>
-                <div>
+                  </div>
+                  <div>
                   <span style={{ display: "block", color: "#8a988e", fontSize: "12px" }}>
                     Confidence
                   </span>
@@ -545,8 +601,8 @@ export default function App() {
                       ? `${Math.round(analyzeResult.intent.confidence * 100)}%`
                       : "-"}
                   </strong>
-                </div>
-                <div>
+                  </div>
+                  <div>
                   <span style={{ display: "block", color: "#8a988e", fontSize: "12px" }}>
                     Clarification
                   </span>
@@ -555,6 +611,49 @@ export default function App() {
                       ? "Needed"
                       : "Not needed"}
                   </strong>
+                  </div>
+                {analyzeResult.training_time_estimate && (
+                  <div>
+                    <span style={{ display: "block", color: "#8a988e", fontSize: "12px" }}>
+                      Estimated training time
+                    </span>
+                    <strong>
+                      {formatDuration(analyzeResult.training_time_estimate.min_seconds)}
+                      {" - "}
+                      {formatDuration(analyzeResult.training_time_estimate.max_seconds)}
+                    </strong>
+                  </div>
+                )}
+                </div>
+                <div style={{ marginTop: "22px" }}>
+                  <button
+                    type="button"
+                    onClick={confirmTraining}
+                    disabled={trainingState === "loading" || trainingConfirmed}
+                    style={{
+                      padding: "11px 18px",
+                      border: 0,
+                      borderRadius: "6px",
+                      background: trainingState === "loading" || trainingConfirmed ? "#7f9a89" : "#1e6041",
+                      color: "#ffffff",
+                      cursor: trainingState === "loading" || trainingConfirmed ? "default" : "pointer",
+                      font: "600 14px Arial, sans-serif",
+                    }}
+                  >
+                    {trainingState === "loading" ? "Training..." : "Confirm and train"}
+                  </button>
+                  {trainingState === "error" && (
+                    <p style={{ margin: "10px 0 0", color: "#a13d35" }}>
+                      {trainingError}
+                    </p>
+                  )}
+                  {trainingState === "success" && trainingResult && (
+                    <p style={{ margin: "10px 0 0", color: "#1e6041" }}>
+                      {trainingResult.report?.summary ||
+                        trainingResult.automl_training?.status ||
+                        "Training completed successfully."}
+                    </p>
+                  )}
                 </div>
               </div>
             ) : (
