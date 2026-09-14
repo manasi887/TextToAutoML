@@ -1,346 +1,243 @@
-TextToAutoML
-
-Natural Language Driven Machine Learning Automation
-
-TextToAutoML is a natural-language-driven machine learning automation
-system designed to make machine learning easier for non-technical users.
-Users can upload a CSV/XLSX dataset and describe their ML task in plain
-English. The system interprets the request, resolves the ML task and
-target, runs the supported AutoML pipeline, evaluates candidate models,
-saves the best model, and exposes it for prediction.
-
-Example: "Predict whether customers will leave."
-
-Project Status
-
-The current implementation provides an end-to-end flow for
-classification and regression. Clustering is recognized by the NLP
-and recommendation layers, but clustering model training is not
-currently implemented in the AutoML training pipeline.
-
-Dataset + Natural Language Request
-                ↓
-          NLP Intent Detection
-                ↓
-       Confidence / Clarification
-                ↓
-            Task Mapping
-                ↓
-          Target Extraction
-                ↓
-          Target Matching
-                ↓
-        Dataset Resolution
-                ↓
-          AutoML Training
-                ↓
-        Model Evaluation
-                ↓
-         Best Model Selection
-                ↓
-          Model Persistence
-                ↓
-             Prediction
-
-Key Features
-
-CSV and XLSX/Excel dataset upload
-
-Dataset validation, analysis, and preprocessing
-
-Missing-value and duplicate handling
-
-Date-column processing and feature extraction
-
-Dataset intelligence for identifier, constant, and high-cardinality
-columns
-
-Natural-language ML task understanding
-
-Fine-tuned DistilBERT intent classifier
-
-Four intents: classification, regression, clustering, unknown
-
-Confidence-based clarification for uncertain requests
-
-Natural-language target extraction and deterministic target matching
-
-Dataset-aware target resolution
-
-Automated classification and regression model training
-
-Model evaluation and best-model selection
-
-.joblib model persistence
-
-Prediction API with saved preprocessing and feature validation
-
-Training-time estimation
-
-Structured training reports
-
-React + Vite frontend
-
-FastAPI backend
-
-NLP Intent Recognition
-
-The NLP module uses:
-
-distilbert-base-uncased
-
-The intent dataset contains 200 balanced examples:
-
-Intent             Examples
-
-Classification           50
-Regression               50
-Clustering               50
-Unknown                  50
-
-The data is split into:
-
-70% Training
-15% Validation
-15% Testing
-
-Official held-out performance
-
-Metric               Score
-
-Accuracy            83.33%
-Macro Precision     85.07%
-Macro Recall        83.93%
-Macro F1            82.98%
-
-These are the currently measured results. The original 85% project
-accuracy goal has not been claimed as achieved.
-
-Clarification System
-
-The clarification layer checks the top intent probability, the
-difference between the top two probabilities, and whether the predicted
-intent is unknown.
-
-Current baseline thresholds:
-
-Minimum top probability = 0.30
-Minimum top-two margin  = 0.05
-
-If a request is unknown, ambiguous, or insufficiently confident, the
-system asks for clarification instead of training.
-
-For example:
-
-"Analyze this dataset"
-
-does not specify a clear ML task, so the system requests clarification.
-
-Target Resolution
-
-For supervised learning, target understanding is separated into three
-stages.
-
-Target extraction
-
-The system extracts the natural-language target:
-
-Predict customer churn
-        ↓
-customer churn
-
-Target matching
-
-The extracted target is compared with actual dataset columns using
-deterministic techniques:
-
-normalization
-
-exact matching
-
-token overlap
-
-containment
-
-candidate scoring
-
-ambiguity detection
-
-The matcher deliberately avoids embeddings, fuzzy matching,
-domain-specific synonym tables, and dataset-value inspection.
-
-Dataset resolution
-
-The final resolution combines the NLP intent, target information, and
-dataset information. If the system cannot safely resolve the request, it
-asks for clarification rather than making an unsafe assumption.
-
-AutoML Pipeline
-
-Dataset
-   ↓
-Target Column
-   ↓
-Problem Type
-   ↓
-Preprocessing
-   ↓
-Candidate Models
-   ↓
-Training
-   ↓
-Evaluation
-   ↓
-Best Model Selection
-   ↓
-Persistence
-
-Classification models
-
-Logistic Regression
-
-Decision Tree Classifier
-
-Random Forest Classifier
-
-Regression models
-
-Linear Regression
-
-Decision Tree Regressor
-
-Random Forest Regressor
-
-Clustering status
-
-Clustering is currently supported at the intent/recommendation level.
-The recommendation layer can identify clustering and recommend K-Means,
-DBSCAN, or Agglomerative Clustering, but these models are not currently
-trained, evaluated, persisted, or exposed through the prediction
-pipeline.
-
-Prediction API
-
-The prediction endpoint is:
-
-POST /predict/
-
-Example request:
-
-{
-  "model_id": "your_model_id",
-  "data": [
-    {
-      "feature_1": 10,
-      "feature_2": "value"
-    }
-  ]
-}
-
-The prediction pipeline loads the saved model, validates required
-features, applies the saved preprocessing and feature order, and returns
-JSON-safe predictions. Classification models can also return
-probabilities when supported.
-
-Training-Time Estimation
-
-TextToAutoML includes a lightweight training-time estimator based on:
-
-number of rows
-
-number of input features
-
-problem type
-
-number of candidate models
-
-It provides an estimated time plus a minimum and maximum range. This is
-a rough user-facing estimate, not a guaranteed execution time; actual
-time depends on hardware, dataset characteristics, model complexity, and
-system load.
-
-Training Reports
-
-After successful NLP-driven training, the system generates a structured
-report containing information such as:
-
-task
-
-target column
-
-problem type
-
-dataset size
-
-input feature count
-
-training/test rows
-
-models trained and failed
-
-selected model
-
-selection metric
-
-model metrics
-
-model ID
-
-warnings
-
-A future planned layer is BART-based natural-language reporting,
-which will turn structured AutoML results into a simple explanation and
-model usage guide.
-
-Backend API
-
-The backend uses FastAPI.
-
-Endpoint                            Purpose
-
-POST /upload/                     Upload and analyze a dataset
-
-POST /train/                      Run the existing AutoML training
-flow
-
-POST /predict/                    Make predictions using a saved
-model
-
-POST /nlp/analyze                 Interpret a natural-language ML
-request
-
-Swagger documentation:
-
-http://127.0.0.1:8001/docs
-
-Frontend
-
-The frontend uses React + Vite and currently supports:
-
-Dataset upload
-
-Dataset readiness information
-
-Natural-language task input
-
-NLP analysis
-
-Clarification messages
-
-Target/problem-type display
-
-Training confirmation
-
-Training status
-
-Training results
-
-Development URL:
-
-http://127.0.0.1:5173/
-
-Project Structure
-
+# TextToAutoML
+
+### Natural Language Driven Machine Learning Automation
+
+> **TextToAutoML** is an end-to-end machine learning automation system that allows users to describe their machine learning task in natural language and automatically connect that request to an AutoML training pipeline.
+
+Instead of requiring users to manually determine the machine learning problem, select a target column, preprocess the dataset, choose algorithms, train models, and evaluate results, TextToAutoML aims to automate this workflow through a combination of **Natural Language Processing (NLP)** and **Automated Machine Learning (AutoML)**.
+
+---
+
+##  Project Status
+
+| Component | Status |
+|---|---|
+| Dataset Upload |  Implemented |
+| Dataset Validation |  Implemented |
+| Dataset Analysis |  Implemented |
+| Dataset Intelligence |  Implemented |
+| NLP Intent Detection |  Implemented |
+| Intent Clarification |  Implemented |
+| Target Extraction |  Implemented |
+| Target Matching |  Implemented |
+| Target Resolution |  Implemented |
+| Classification Training |  Implemented |
+| Regression Training |  Implemented |
+| Model Selection |  Implemented |
+| Model Persistence |  Implemented |
+| Prediction API |  Implemented |
+| Training-Time Estimation |  Implemented |
+| Training Report |  Implemented |
+| React Frontend |  Implemented |
+| NLP → AutoML Integration |  Implemented |
+| Clustering Training | ⏳ Planned |
+| BART User-Facing Explanation | ⏳ Planned |
+
+---
+
+#  Overview
+
+Traditional AutoML systems generally require the user to understand concepts such as:
+
+- Classification vs. regression
+- Target-column selection
+- Data preprocessing
+- Algorithm selection
+- Model evaluation
+- Prediction input requirements
+
+TextToAutoML introduces a **Natural Language Interface** on top of the AutoML workflow.
+
+The user can provide a request such as:
+
+> **"Predict whether customers will leave."**
+
+TextToAutoML analyzes the request, identifies the intended machine learning task, resolves the target column from the uploaded dataset, estimates the training time, and can then pass the confirmed task to the existing AutoML pipeline.
+
+---
+
+#  Project Objective
+
+The main objective of TextToAutoML is to create a system where users can interact with machine learning through **natural language rather than manually configuring an ML pipeline**.
+
+The system focuses primarily on:
+
+1. Natural-language understanding
+2. Intent recognition
+3. Target identification
+4. Dataset analysis
+5. Automated model training
+6. Model evaluation
+7. Model persistence
+8. Prediction
+9. Human-readable reporting
+
+---
+
+#  Core Idea
+
+The overall concept can be represented as:
+
+```text
+                         USER
+                           │
+                           ▼
+               Natural Language Request
+                           │
+                           ▼
+                 ┌─────────────────┐
+                 │    NLP Layer    │
+                 │    DistilBERT   │
+                 └────────┬────────┘
+                          │
+                          ▼
+                  Intent Recognition
+                          │
+                 ┌────────┴────────┐
+                 │                 │
+                 ▼                 ▼
+             Confident         Ambiguous /
+              Intent             Unknown
+                 │                 │
+                 │                 ▼
+                 │            Clarification
+                 │                 │
+                 └────────┬────────┘
+                          │
+                          ▼
+                 Task / Target Resolution
+                          │
+                          ▼
+                 Dataset Intelligence
+                          │
+                          ▼
+                     AutoML Layer
+                          │
+                          ▼
+               Model Training & Evaluation
+                          │
+                          ▼
+                     Best Model
+                          │
+                  ┌───────┴────────┐
+                  ▼                ▼
+            Training Report     Prediction
+                  │
+                  ▼
+           BART Explanation
+              (Planned)
+````
+
+---
+
+#  End-to-End Workflow
+
+```text
+1. Upload Dataset
+       ↓
+2. Validate Dataset
+       ↓
+3. Analyze Dataset
+       ↓
+4. Enter Natural Language Request
+       ↓
+5. Detect User Intent
+       ↓
+6. Check Intent Confidence
+       ↓
+7. Ask for Clarification if Required
+       ↓
+8. Map Intent to ML Task
+       ↓
+9. Extract Target Reference
+       ↓
+10. Match Target to Dataset Column
+       ↓
+11. Resolve Final Task + Target
+       ↓
+12. Estimate Training Time
+       ↓
+13. Run AutoML
+       ↓
+14. Train Candidate Models
+       ↓
+15. Evaluate Models
+       ↓
+16. Select Best Model
+       ↓
+17. Save Model
+       ↓
+18. Generate Training Report
+       ↓
+19. Explain Model to User
+       ↓
+20. Predict on New Data
+```
+
+---
+
+#  System Architecture
+
+TextToAutoML is divided into several major layers.
+
+```text
+┌─────────────────────────────────────────────────────┐
+│                    React Frontend                   │
+│                                                     │
+│ Dataset Upload → Task Input → Results               │
+└──────────────────────────┬──────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────┐
+│                    FastAPI API                      │
+│                                                     │
+│ /upload/                                            │
+│ /nlp/analyze                                        │
+│ /nlp/train                                          │
+│ /train/                                              │
+│ /predict/                                            │
+└────────────────┬────────────────────┬───────────────┘
+                 │                    │
+                 ▼                    ▼
+┌─────────────────────────┐  ┌────────────────────────┐
+│       NLP Layer         │  │     Dataset Layer      │
+│                         │  │                        │
+│ DistilBERT              │  │ Loader                 │
+│ Intent Detection        │  │ Validator              │
+│ Clarification           │  │ Analyzer               │
+│ Target Extraction       │  │ Preprocessing          │
+│ Target Matching         │  │ Intelligence           │
+└────────────┬────────────┘  └────────────┬───────────┘
+             │                            │
+             └──────────────┬─────────────┘
+                            ▼
+                 ┌─────────────────────┐
+                 │     AutoML Layer    │
+                 │                     │
+                 │ Problem Detection   │
+                 │ Pipeline            │
+                 │ Training            │
+                 │ Evaluation          │
+                 │ Model Selection     │
+                 │ Persistence         │
+                 │ Prediction          │
+                 └──────────┬──────────┘
+                            │
+                            ▼
+                 ┌─────────────────────┐
+                 │   Reporting Layer   │
+                 │                     │
+                 │ Training Report     │
+                 │ BART Explanation    │
+                 │      (Planned)      │
+                 └─────────────────────┘
+```
+
+---
+
+#  Project Structure
+
+```text
 TextToAutoML/
 │
 ├── backend/
@@ -367,9 +264,11 @@ TextToAutoML/
 │   │   │   ├── evaluator.py
 │   │   │   ├── persistence.py
 │   │   │   ├── predictor.py
-│   │   │   └── nlp_integration.py
+│   │   │   ├── nlp_integration.py
+│   │   │   └── time_estimator.py
 │   │   │
 │   │   ├── metalearning/
+│   │   │
 │   │   ├── reporting/
 │   │   │   └── training_report.py
 │   │   │
@@ -387,218 +286,1023 @@ TextToAutoML/
 │   │       ├── dataset_resolution.py
 │   │       └── pipeline.py
 │   │
-│   └── storage/
-│       ├── uploads/
-│       ├── models/
-│       ├── reports/
-│       └── nlp_models/
+│   ├── storage/
+│   │   ├── uploads/
+│   │   ├── models/
+│   │   ├── reports/
+│   │   └── nlp_models/
+│   │       └── intent_classifier/
+│   │
+│   └── main.py
 │
 ├── frontend/
-│   ├── package.json
+│   ├── src/
+│   │   ├── main.jsx
+│   │   └── App.jsx
 │   ├── index.html
-│   ├── vite.config.js
-│   └── src/
-│       ├── main.jsx
-│       └── App.jsx
+│   ├── package.json
+│   └── vite.config.js
 │
-└── tests/
+├── tests/
+│   ├── test_nlp_pipeline.py
+│   └── test_time_estimator.py
+│
+├── README.md
+└── ...
+```
 
-Technology Stack
+---
 
-Backend: Python, FastAPI, Pandas, NumPy, Scikit-learn, Joblib
+#  Natural Language Processing Layer
 
-NLP: Hugging Face Transformers, DistilBERT, PyTorch, Scikit-learn
-metrics
+The NLP layer is the main interface between the user's natural-language request and the machine learning system.
 
-Frontend: React, Vite, JavaScript
+It performs:
 
-Data formats: CSV, XLSX
+- Intent detection
+- Confidence analysis
+- Clarification
+- Task mapping
+- Target extraction
+- Target-column matching
+- Dataset resolution
 
-Model persistence: Joblib
+---
 
-Installation and Running
+## Intent Recognition
 
-1. Clone the repository
+TextToAutoML uses **DistilBERT** for intent classification.
 
-git clone <repository-url>
+The model recognizes four intent classes:
+
+| IntentMeaning    |                                                            |
+| ---------------- | ---------------------------------------------------------- |
+| `classification` | Predict a category or class                                |
+| `regression`     | Predict a numerical value                                  |
+| `clustering`     | Group similar records                                      |
+| `unknown`        | Request cannot be confidently mapped to a supported intent |
+
+The model is based on:
+
+```text
+distilbert-base-uncased
+```
+
+---
+
+#  Intent Dataset
+
+The current intent dataset contains:
+
+```text
+Total examples: 200
+
+Classification: 50
+Regression:     50
+Clustering:     50
+Unknown:        50
+```
+
+The dataset is balanced across all four intent classes.
+
+The examples are designed to represent realistic natural-language machine learning requests.
+
+---
+
+#  NLP Model Evaluation
+
+The current held-out test performance of the DistilBERT intent classifier is:
+
+| MetricScore     |        |
+| --------------- | ------ |
+| Accuracy        | 83.33% |
+| Macro Precision | 85.07% |
+| Macro Recall    | 83.93% |
+| Macro F1        | 82.98% |
+
+### Per-Intent Performance
+
+| IntentPrecisionRecallF1 |      |      |      |
+| ----------------------- | ---- | ---- | ---- |
+| Classification          | 1.00 | 0.62 | 0.77 |
+| Regression              | 0.75 | 0.86 | 0.80 |
+| Clustering              | 0.88 | 0.88 | 0.88 |
+| Unknown                 | 0.78 | 1.00 | 0.88 |
+
+> **Note:** These are the official held-out evaluation results. A separate handpicked diagnostic set produced a higher result, but it is not used as the official model evaluation.
+
+---
+
+#  Intent Confidence & Clarification
+
+TextToAutoML does not blindly trust the intent classifier.
+
+The system checks:
+
+- Top intent probability
+- Difference between the top two intents
+- Whether the predicted intent is `unknown`
+
+The current baseline clarification rules are:
+
+```text
+Minimum top probability = 0.30
+Minimum top-two margin  = 0.05
+```
+
+If the request is uncertain, the system asks the user to clarify instead of continuing automatically.
+
+### Example
+
+Input:
+
+```text
+Analyze this dataset
+```
+
+Output:
+
+```text
+Intent: unknown
+Needs clarification: true
+Ready for training: false
+Training time estimate: null
+```
+
+This prevents an ambiguous request from accidentally triggering an ML task.
+
+---
+
+#  Target Extraction
+
+After identifying a supported intent, TextToAutoML attempts to determine what the user wants to predict.
+
+For example:
+
+```text
+Predict customer churn
+```
+
+becomes:
+
+```text
+Target reference:
+customer churn
+```
+
+Another example:
+
+```text
+Predict median house value
+```
+
+becomes:
+
+```text
+Target reference:
+median house value
+```
+
+Target extraction is currently implemented using deterministic rules rather than another ML model.
+
+---
+
+#  Target Matching
+
+The extracted natural-language target is matched against the dataset's actual column names.
+
+The matcher uses:
+
+- Normalization
+- Exact matching
+- Token overlap
+- Containment
+- Candidate scoring
+- Confidence thresholds
+- Ambiguity detection
+
+Current matching thresholds include:
+
+```text
+Minimum match score       = 0.80
+Minimum score margin      = 0.25
+Minimum candidate score   = 0.50
+```
+
+The system preserves the original dataset column name when returning the matched target.
+
+---
+
+#  Dataset Intelligence
+
+The dataset layer provides information required for automated decision-making.
+
+## Dataset Loading
+
+Supports:
+
+- CSV
+- XLSX
+
+## Dataset Validation
+
+Checks for problems such as:
+
+- Empty datasets
+- Invalid input
+- Missing target columns
+- Dataset structure issues
+
+## Dataset Analysis
+
+Provides information such as:
+
+- Number of rows
+- Number of columns
+- Data types
+- Missing values
+- Dataset characteristics
+
+## Dataset Intelligence
+
+Detects:
+
+- Identifier columns
+- Constant columns
+- High-cardinality columns
+- Potentially useful dataset recommendations
+
+---
+
+#  AutoML Layer
+
+The AutoML layer receives the resolved machine learning task and dataset.
+
+The current supervised training workflow supports:
+
+- Binary Classification
+- Multi-class Classification
+- Regression
+
+---
+
+## Supported Models
+
+### Classification
+
+```text
+LogisticRegression
+DecisionTreeClassifier
+RandomForestClassifier
+```
+
+### Regression
+
+```text
+LinearRegression
+DecisionTreeRegressor
+RandomForestRegressor
+```
+
+The models are trained and evaluated automatically.
+
+The best-performing model is selected according to the task-specific evaluation metric.
+
+---
+
+#  Model Evaluation
+
+## Classification
+
+The classification pipeline evaluates models using metrics including:
+
+- Accuracy
+- Precision
+- Recall
+- F1 Score
+
+Model selection uses:
+
+```text
+F1 Score
+```
+
+## Regression
+
+The regression pipeline evaluates models using metrics including:
+
+- RMSE
+- R²
+
+Model selection uses:
+
+```text
+RMSE
+```
+
+Lower RMSE is better.
+
+---
+
+#  Model Persistence
+
+After training, the selected model is persisted as a model package.
+
+The package stores information such as:
+
+```text
+Model
+Model ID
+Target column
+Problem type
+Model name
+Metrics
+Preprocessing information
+Feature names
+Creation timestamp
+```
+
+This allows the saved model to be reused later for predictions.
+
+---
+
+#  Prediction
+
+The prediction API accepts:
+
+- Model ID
+- New input records
+
+The system loads the saved model and applies the same preprocessing configuration used during training.
+
+The prediction response can contain:
+
+```text
+Prediction
+Prediction count
+Class probabilities
+Model name
+Problem type
+Target column
+```
+
+For classification models, prediction probabilities are also returned when supported.
+
+---
+
+# Training-Time Estimation
+
+TextToAutoML provides an estimated training time before training begins.
+
+The estimator considers:
+
+- Number of rows
+- Number of features
+- Problem type
+- Number of candidate models
+
+The current estimator is a lightweight heuristic intended to provide users with an approximate expectation rather than an exact runtime guarantee.
+
+Conceptually:
+
+```text
+Dataset Size
+     +
+Feature Count
+     +
+Model Count
+     +
+Problem Type
+     ↓
+Estimated Training Time
+```
+
+The frontend displays the result in a human-readable format such as:
+
+```text
+Estimated training time:
+6 seconds – 9 seconds
+```
+
+The actual training process also records the measured training duration.
+
+---
+
+#  Training Report
+
+After successful training, TextToAutoML generates a structured training report.
+
+The report contains information such as:
+
+## Task
+
+- Target column
+- Problem type
+
+## Dataset
+
+- Number of rows
+- Number of usable input features
+- Training rows
+- Testing rows
+
+## Models
+
+- Number of models trained
+- Number of failed models
+
+## Best Model
+
+- Model name
+- Selection metric
+- Evaluation metrics
+- Model ID
+
+The report is designed to provide a concise summary of the completed AutoML process.
+
+---
+
+#  BART User-Facing Explanation
+
+A planned component of TextToAutoML is a **BART-based explanation layer**.
+
+BART is intended to work **after AutoML**, rather than making the machine learning decisions itself.
+
+The planned architecture is:
+
+```text
+User Request
+     ↓
+DistilBERT
+     ↓
+Task + Target Resolution
+     ↓
+AutoML
+     ↓
+Best Model + Metrics + Required Features
+     ↓
+Structured Training Report
+     ↓
+BART
+     ↓
+Human-Readable Explanation
+     ↓
+How to Use the Model
+```
+
+The purpose of BART will be to transform structured AutoML results into an understandable explanation for non-technical users.
+
+For example, it may explain:
+
+- What task was performed
+- Which target was predicted
+- Which model was selected
+- How well the model performed
+- Which input fields are required
+- How the user can provide new data for prediction
+
+> BART is currently a **planned feature** and is not yet part of the implemented production pipeline.
+
+---
+
+#  Clustering Status
+
+Clustering is recognized by the NLP layer.
+
+For example:
+
+```text
+Group customers into similar segments
+```
+
+can be identified as:
+
+```text
+Intent:
+clustering
+```
+
+However, the current AutoML training layer does **not yet implement clustering model training**.
+
+Currently supported AutoML training types are:
+
+```text
+Binary Classification
+Multi-class Classification
+Regression
+```
+
+Therefore, clustering is currently supported at the **NLP/task-recognition level**, while clustering training remains future scope.
+
+Potential future algorithms include:
+
+```text
+K-Means
+DBSCAN
+Agglomerative Clustering
+```
+
+---
+
+#  FastAPI Backend
+
+The backend is implemented using **FastAPI**.
+
+## Main API Endpoints
+
+| EndpointMethodPurpose |          |                                      |
+| --------------------- | -------- | ------------------------------------ |
+| `/upload/`            | POST     | Upload and analyze a dataset         |
+| `/nlp/analyze`        | POST     | Analyze a natural-language request   |
+| `/nlp/train`          | POST     | Resolve NLP request and train AutoML |
+| `/train/`             | POST     | Direct AutoML training               |
+| `/predict/`           | POST     | Generate predictions                 |
+| `/report/`            | GET/POST | Training report functionality        |
+
+FastAPI also provides interactive API documentation through Swagger UI.
+
+---
+
+#  Frontend
+
+The frontend is implemented using:
+
+- React
+- Vite
+- JavaScript
+
+The current frontend provides a simple workflow:
+
+```text
+Upload Dataset
+      ↓
+Enter Natural Language Task
+      ↓
+Analyze
+      ↓
+View Intent / Target / Problem Type
+      ↓
+Confirm and Train
+      ↓
+View Training Result
+```
+
+The interface also handles clarification requests.
+
+For example, if the system receives:
+
+```text
+Analyze this dataset
+```
+
+the frontend displays a clarification message instead of starting training.
+
+---
+
+#  Frontend ↔ Backend
+
+During development, Vite proxies frontend API requests to the FastAPI backend.
+
+```text
+React / Vite
+     │
+     │ HTTP
+     ▼
+FastAPI
+     │
+     ├── /upload/
+     ├── /nlp/analyze
+     ├── /nlp/train
+     ├── /train/
+     └── /predict/
+```
+
+---
+
+#  Technology Stack
+
+| AreaTechnology          |                           |
+| ----------------------- | ------------------------- |
+| Frontend                | React                     |
+| Frontend Build Tool     | Vite                      |
+| Backend                 | FastAPI                   |
+| Programming Language    | Python                    |
+| NLP                     | Hugging Face Transformers |
+| NLP Model               | DistilBERT                |
+| NLP Utilities           | SpaCy                     |
+| Machine Learning        | Scikit-learn              |
+| Data Processing         | Pandas                    |
+| Deep Learning Framework | PyTorch                   |
+| Model Serialization     | Joblib                    |
+| API Documentation       | Swagger / OpenAPI         |
+| Version Control         | Git / GitHub              |
+| Containerization        | Docker                    |
+| Database                | PostgreSQL                |
+
+---
+
+#  Installation
+
+## 1. Clone the Repository
+
+```bash
+git clone https://github.com/manasi887/TextToAutoML.git
 cd TextToAutoML
+```
 
-2. Activate the Python environment
+---
 
-Windows:
+## 2. Create a Python Virtual Environment
 
-.venv\Scripts\activate
+### Windows
 
-Install the project's Python dependencies according to its dependency
-configuration.
+```powershell
+python -m venv .venv
+```
 
-3. Start the backend
+Activate it:
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+---
+
+## 3. Install Backend Dependencies
+
+Install the required Python packages according to the project's dependency configuration.
+
+If a `requirements.txt` file is available:
+
+```powershell
+pip install -r requirements.txt
+```
+
+---
+
+# Running the Backend
 
 From the project root:
 
+```powershell
 .venv\Scripts\python.exe -m uvicorn main:app --app-dir backend --reload --port 8001
+```
 
-Backend:
+The backend will be available at:
 
+```text
 http://127.0.0.1:8001
+```
 
-4. Start the frontend
+Swagger documentation:
 
-In another terminal:
+```text
+http://127.0.0.1:8001/docs
+```
 
+---
+
+# Running the Frontend
+
+Open another terminal:
+
+```powershell
 cd frontend
 npm install
 npm run dev
+```
 
-Frontend:
+Vite will provide the local frontend URL.
 
-http://127.0.0.1:5173/
+---
 
-Example Workflows
+#  Testing
 
-Classification
+The project contains focused automated tests for important components.
 
-Upload Customer-Churn-Records.csv and enter:
+For example:
 
+```powershell
+.venv\Scripts\python.exe -m pytest -q tests/test_nlp_pipeline.py tests/test_time_estimator.py backend/test_nlp_integration.py
+```
+
+Current verified result:
+
+```text
+13 passed in 2.68s
+```
+
+---
+
+#  Example Workflow 1 — Classification
+
+## Dataset
+
+```text
+Customer-Churn-Records.csv
+```
+
+## User Request
+
+```text
 Predict whether customers will leave
+```
 
-The system can resolve:
+## NLP Resolution
 
-Intent       → Classification
-Target       → Exited
-Problem Type → Binary Classification
+```text
+Intent:
+classification
 
+Target:
+Exited
+
+Problem Type:
+Binary Classification
+
+Ready for Training:
+true
+```
+
+## AutoML
+
+The system can then train candidate classification models and select the best-performing model.
+
+---
+
+#  Example Workflow 2 — Regression
+
+## Dataset
+
+```text
+housing.csv
+```
+
+## User Request
+
+```text
+Predict median house value
+```
+
+## NLP Resolution
+
+```text
+Intent:
+regression
+
+Target:
+median_house_value
+
+Problem Type:
 Regression
 
-Upload housing.csv and enter:
+Ready for Training:
+true
+```
 
-Predict median house value
+The AutoML layer then evaluates the available regression models and selects the best-performing model.
 
-The system resolves:
+---
 
-Intent       → Regression
-Target       → median_house_value
-Problem Type → Regression
+#  Example Workflow 3 — Unknown Request
 
-Unknown request
+## User Request
 
-Enter:
-
+```text
 Analyze this dataset
+```
 
-Expected behavior:
+## Result
 
-Intent              → Unknown
-Needs clarification → Yes
-Ready for training  → No
-Training estimate   → None
+```text
+Intent:
+unknown
 
-Testing
+Needs Clarification:
+true
 
-Run the Python tests from the project root:
+Ready for Training:
+false
 
-.venv\Scripts\python.exe -m pytest -q
+Training Time Estimate:
+null
+```
 
-The test suite includes coverage for NLP intent processing,
-clarification, target extraction, target matching, dataset resolution,
-NLP-to-AutoML integration, training reports, and training-time
-estimation.
+The system does **not** automatically select a machine learning task.
 
-Design Principles
+Instead, it asks the user to clarify what they want to accomplish.
 
-Separation of responsibilities
+This is an important safety mechanism in the NLP-to-AutoML workflow.
 
-NLP determines what the user means; AutoML handles model training.
+---
 
+#  Design Principles
+
+TextToAutoML follows several important design principles.
+
+## 1. Natural Language First
+
+Users should be able to describe their ML goal naturally.
+
+## 2. Don't Guess When Uncertain
+
+Ambiguous requests should trigger clarification instead of silently selecting an incorrect task.
+
+## 3. Deterministic Target Resolution
+
+Target matching uses explicit scoring and ambiguity rules rather than uncontrolled assumptions.
+
+## 4. Separation of Responsibilities
+
+The system separates:
+
+```text
+NLP
+Dataset Intelligence
+AutoML
+Reporting
+Prediction
+```
+
+This makes the architecture easier to test and maintain.
+
+## 5. Reuse Existing AutoML
+
+The NLP layer does not duplicate the existing AutoML training logic.
+
+Instead:
+
+```text
 NLP
  ↓
-Structured ML Task
+Confirmed Resolution
  ↓
-AutoML
+Existing AutoML Pipeline
+```
 
-Do not blindly select targets
+## 6. JSON-Safe API Responses
 
-Automatic dataset-based target detection can produce incorrect
-candidates. Target resolution therefore combines the natural-language
-target, dataset column matching, confidence, and clarification.
+API responses are normalized so that model outputs and numerical values can safely be serialized into JSON.
 
-Fail safely
+---
 
-When intent or target resolution is uncertain, the system clarifies
-instead of guessing.
+#  Current Limitations
 
-Preserve the working AutoML core
+The current implementation has several known limitations.
 
-The existing training and prediction pipeline remains a separate
-component while NLP is integrated around it.
+## NLP Model Performance
 
-Current Limitations
+The current held-out DistilBERT accuracy is:
 
-DistilBERT currently achieves 83.33% official held-out accuracy, so
-the intent model can still be improved.
+```text
+83.33%
+```
 
-The intent dataset contains only 200 examples.
+Therefore, the NLP model should not currently be described as achieving 90%+ official test accuracy.
 
-Intent confidence thresholds are baseline heuristics rather than
-calibrated probabilities.
+## Training-Time Estimation
 
-Natural-language target matching is intentionally conservative.
+The current training-time estimator is heuristic.
 
-Some natural-language descriptions may require clarification.
+Actual training time depends on:
 
-Clustering is recognized but does not yet have an implemented AutoML
-training pipeline.
+- Hardware
+- CPU/GPU availability
+- Dataset characteristics
+- Model complexity
+- System load
 
-The training-time estimator is heuristic.
+Therefore, the estimate should be treated as approximate.
 
-BART-based natural-language report generation is planned, but is not
-yet part of the implemented training flow.
+## Clustering
 
-Future Scope
+Clustering is recognized by the NLP layer but is not yet implemented in the AutoML training layer.
 
-Expand the intent dataset with more real-world queries.
+## BART
 
-Improve intent classification and probability calibration.
+The BART explanation layer is planned and has not yet been integrated into the production workflow.
 
-Improve general natural-language target matching.
+## Target Matching
 
-Implement clustering training, evaluation, persistence, and
-prediction.
+Target matching currently relies on deterministic matching techniques and may require clarification for highly ambiguous or semantically different target descriptions.
 
-Strengthen model recommendation/meta-learning.
+---
 
-Improve hyperparameter optimization.
+#  Future Scope
 
-Add BART-based natural-language training reports and model usage
-guidance.
+Future development can extend TextToAutoML with:
 
-Improve visualizations and user experience.
+- Full clustering support
+- K-Means / DBSCAN / Agglomerative Clustering
+- Improved NLP intent classification
+- Larger and more diverse intent datasets
+- Better confidence calibration
+- Advanced semantic target matching
+- Meta-learning based algorithm recommendation
+- Hyperparameter optimization
+- BART-based user explanations
+- Richer visualizations
+- Automated model comparison dashboards
+- More sophisticated training-time prediction
+- Expanded prediction workflows
+- Improved model monitoring
+- Dockerized deployment
+- PostgreSQL-backed experiment tracking
 
-Expand testing across more datasets and real user requests.
+---
 
-Project Goal
+#  Long-Term Vision
 
-The long-term goal of TextToAutoML is to make machine learning
-accessible through natural language:
+The long-term goal is to make machine learning accessible to users who may not have a strong machine learning background.
 
-Instead of:
-"Which algorithm should I use?"
+The intended experience is:
 
-The user says:
-"Predict whether these customers will leave."
+```text
+"I have a dataset and I want to know
+which customers are likely to leave."
 
-TextToAutoML handles the ML workflow.
+                    ↓
 
-The project aims to bridge the gap between natural-language user
-requirements and automated machine learning pipelines, reducing the
-technical knowledge required to build and use machine learning models.
+              TextToAutoML
 
-Author
+                    ↓
 
-Manasi Umesh Jadhav
-B.Tech Artificial Intelligence and Data Science
-K. K. Wagh Institute of Engineering Education and Research
+        Understand the request
 
-License
+                    ↓
 
-Add the project's chosen license here before public distribution.
+        Understand the dataset
+
+                    ↓
+
+        Determine the ML problem
+
+                    ↓
+
+        Identify the target
+
+                    ↓
+
+        Train multiple models
+
+                    ↓
+
+        Select the best model
+
+                    ↓
+
+        Explain the result
+
+                    ↓
+
+        Make predictions
+```
+
+The system aims to transform a traditionally technical ML workflow into a more natural, guided interaction.
+
+---
+
+#  Author
+
+**Manasi Jadhav**
+
+B.Tech — Artificial Intelligence & Data Science
+
+**TextToAutoML — Final Year Project**
+
+---
+
+#  License
+
+This project is currently developed as an academic Final Year Project.
+
+A formal open-source license can be added when the project is prepared for public distribution.
+
+---
+
+# Project Summary
+
+**TextToAutoML** combines:
+
+```text
+Natural Language Processing
+            +
+Dataset Intelligence
+            +
+Automated Machine Learning
+            +
+Model Evaluation
+            +
+Model Persistence
+            +
+Prediction
+            +
+Human-Readable Reporting
+```
+
+to create a natural-language-driven machine learning automation workflow.
+
+> **Describe your machine learning goal.**
+> **Let TextToAutoML handle the pipeline.**
+
+```
