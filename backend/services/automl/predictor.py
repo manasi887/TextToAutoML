@@ -78,7 +78,7 @@ def _apply_missing_value_strategy(df: pd.DataFrame, model_package: dict[str, Any
 
         if column in categorical_imputation:
             df[column] = df[column].fillna(categorical_imputation[column])
-        elif df[column].dtype == object or pd.api.types.is_string_dtype(df[column]) or pd.api.types.is_categorical_dtype(df[column]):
+        elif df[column].dtype == object or pd.api.types.is_string_dtype(df[column]) or isinstance(df[column].dtype, pd.CategoricalDtype):
             if df[column].isna().any():
                 raise ValueError(
                     "The saved model package is missing training-time categorical imputation values for feature "

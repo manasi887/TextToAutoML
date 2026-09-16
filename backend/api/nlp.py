@@ -3,6 +3,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 
+from config import UPLOAD_DIR
+
 from services.dataset.loader import load_dataset
 from services.automl.nlp_integration import integrate_nlp_with_automl
 from services.reporting.training_report import generate_training_report
@@ -13,8 +15,6 @@ router = APIRouter(
     prefix="/nlp",
     tags=["Natural Language Processing"],
 )
-
-UPLOAD_DIR = (Path(__file__).resolve().parents[1] / "storage" / "uploads").resolve()
 
 
 class NLPRequest(BaseModel):
@@ -104,7 +104,11 @@ async def train_from_nlp_request(request: NLPRequest):
     try:
         df = load_dataset(str(file_path))
         nlp_result = process_nlp_request(request.text, df)
-        integration_result = integrate_nlp_with_automl(df, nlp_result)
+        integration_result = integrate_nlp_with_automl(
+            df,
+            nlp_result,
+            dataset_name=filename,
+        )
         automl_training = integration_result.get("automl_training")
         if (
             integration_result.get("ready_for_training") is True

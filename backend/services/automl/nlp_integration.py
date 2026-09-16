@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 
 from services.automl.pipeline import run_automl_pipeline
+from services.automl.run_history import record_training_run
 
 
 def _json_safe(value: Any) -> Any:
@@ -33,7 +34,7 @@ def _json_safe(value: Any) -> Any:
 
 
 def integrate_nlp_with_automl(
-    df: pd.DataFrame, nlp_result: dict[str, Any]
+    df: pd.DataFrame, nlp_result: dict[str, Any], dataset_name: str | None = None
 ) -> dict[str, Any]:
     """Run AutoML only when NLP resolution confirms training readiness."""
     if not isinstance(df, pd.DataFrame):
@@ -57,10 +58,10 @@ def integrate_nlp_with_automl(
 
     target_column = resolution.get("target_column")
     problem_type = resolution.get("problem_type")
-    if not isinstance(target_column, str) or not target_column.strip():
-        raise ValueError("A resolved target_column is required for AutoML training")
     if not isinstance(problem_type, str) or not problem_type.strip():
         raise ValueError("A resolved problem_type is required for AutoML training")
+    if problem_type.strip().lower() != "clustering" and (not isinstance(target_column, str) or not target_column.strip()):
+        raise ValueError("A resolved target_column is required for AutoML training")
 
     training_started_at = time.perf_counter()
     training_output = run_automl_pipeline(df, target_column, problem_type)
@@ -69,6 +70,14 @@ def integrate_nlp_with_automl(
         **training_output,
         "training_time_seconds": training_time_seconds,
     }
+    run_record, comparison = record_training_run(
+        df,
+        training_output,
+        dataset_name=dataset_name,
+    )
+    if run_record is not None:
+        training_output["run"] = run_record
+        training_output["comparison"] = comparison
     return {
         "nlp_resolution": safe_resolution,
         "automl_training": _json_safe(training_output),

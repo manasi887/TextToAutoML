@@ -1,6 +1,8 @@
 """Comprehensive tests for target matching functionality."""
 
 import sys
+from unittest.mock import patch
+
 import pandas as pd
 
 # Add backend to path for imports
@@ -122,10 +124,109 @@ def test_target_matching():
     total = passed + failed
     print(f"RESULTS: {passed} passed, {failed} failed ({errors} errors) out of {total} tests")
     print("=" * 80)
-    
-    return failed == 0
+
+    assert failed == 0
+
+
+def test_min_candidate_score_includes_exact_boundary_only():
+    dataframe = pd.DataFrame({"boundary": [1], "below": [2]})
+
+    def fake_score(target, column):
+        return {"boundary": 0.50, "below": 0.499999}[column]
+
+    with patch("services.nlp.target_matching._score_match", side_effect=fake_score):
+        result = match_target_column("requested", dataframe)
+
+    assert [item["column"] for item in result["candidates"]] == ["boundary"]
+
+
+def test_min_match_score_accepts_exact_boundary_and_rejects_just_below():
+    boundary_df = pd.DataFrame({"boundary": [1]})
+    below_df = pd.DataFrame({"below": [1]})
+
+    with patch(
+        "services.nlp.target_matching._score_match", return_value=0.80
+    ):
+        boundary_result = match_target_column("requested", boundary_df)
+    with patch(
+        "services.nlp.target_matching._score_match", return_value=0.799999
+    ):
+        below_result = match_target_column("requested", below_df)
+
+    assert boundary_result["matched_column"] == "boundary"
+    assert below_result["matched_column"] is None
+    assert below_result["needs_clarification"] is True
+
+
+def test_min_score_margin_accepts_exact_boundary_and_rejects_just_below():
+    dataframe = pd.DataFrame({"best": [1], "second": [2]})
+
+    def exact_margin_score(target, column):
+        return {"best": 0.90, "second": 0.65}[column]
+
+    def below_margin_score(target, column):
+        return {"best": 0.90, "second": 0.650001}[column]
+
+    with patch(
+        "services.nlp.target_matching._score_match", side_effect=exact_margin_score
+    ):
+        exact_result = match_target_column("requested", dataframe)
+    with patch(
+        "services.nlp.target_matching._score_match", side_effect=below_margin_score
+    ):
+        below_result = match_target_column("requested", dataframe)
+
+    assert exact_result["matched_column"] == "best"
+    assert below_result["matched_column"] is None
+    assert below_result["needs_clarification"] is True
+
+
+def test_abbreviated_target_names_require_clarification_without_synonyms():
+    abbreviation_cases = [
+        ("amt", "amount"),
+        ("cust_ID", "customer ID"),
+        ("sales_amt", "sales amount"),
+    ]
+
+    for target_reference, column_name in abbreviation_cases:
+        result = match_target_column(
+            target_reference,
+            pd.DataFrame({column_name: [1]}),
+        )
+
+        assert result["matched_column"] is None
+        assert result["candidates"] == []
+        assert result["needs_clarification"] is True
+
+
+def test_generic_column_matches_only_when_reference_contains_exact_name():
+    dataframe = pd.DataFrame({"col_1": [1, 2], "col_2": [3, 4], "col_3": [5, 6]})
+
+    exact_result = match_target_column("predict col_2", dataframe)
+    descriptive_result = match_target_column("predict the second column", dataframe)
+
+    assert exact_result["matched_column"] == "col_2"
+    assert exact_result["needs_clarification"] is False
+    assert descriptive_result["matched_column"] is None
+    assert descriptive_result["needs_clarification"] is True
+
+
+def test_house_prices_alias_matches_house_value_target():
+    dataframe = pd.DataFrame(
+        {
+            "median_income": [3.1, 2.8, 4.2],
+            "median_house_value": [220000, 250000, 300000],
+        }
+    )
+
+    for target_reference in ("house prices", "value of each house", "value of a house"):
+        result = match_target_column(target_reference, dataframe)
+
+        assert result["matched_column"] == "median_house_value"
+        assert result["target_reference"] == target_reference
+        assert result["needs_clarification"] is False
 
 
 if __name__ == "__main__":
-    success = test_target_matching()
-    sys.exit(0 if success else 1)
+    test_target_matching()
+    sys.exit(0)

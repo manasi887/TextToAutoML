@@ -5,7 +5,10 @@ from typing import Any, Dict, Iterable, List, Tuple
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.cluster import DBSCAN, KMeans
 from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
@@ -93,6 +96,28 @@ def train_models(
     }
 
 
+def train_clustering_models(X_train: pd.DataFrame) -> Dict[str, object]:
+    """Train deterministic clustering candidates on the prepared feature matrix."""
+    models: Dict[str, Any] = {
+        "KMeans": make_pipeline(StandardScaler(), KMeans(n_clusters=3, random_state=42, n_init=10)),
+        "DBSCAN": make_pipeline(StandardScaler(), DBSCAN(eps=0.9, min_samples=3)),
+    }
+    trained_models: Dict[str, Any] = {}
+    training_errors: List[Dict[str, Any]] = []
+    for model_name, model in models.items():
+        try:
+            model.fit(X_train)
+            trained_models[model_name] = model
+        except Exception as exc:  # pragma: no cover - defensive failure recording
+            training_errors.append({"model_name": model_name, "error": str(exc)})
+    return {
+        "trained_models": trained_models,
+        "model_names": list(trained_models),
+        "status": "Completed" if trained_models else "Failed",
+        "training_errors": training_errors,
+    }
+
+
 def _as_model_list(models: Dict[str, Any] | Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Normalize evaluation results from either a dict or a list-like structure."""
 
@@ -122,7 +147,15 @@ def evaluate_models(
         try:
             predictions = model.predict(X_test)
 
-            if "regression" in normalized_type:
+            if "clustering" in normalized_type:
+                from sklearn.metrics import silhouette_score
+
+                labels = np.asarray(predictions)
+                unique_labels = set(labels.tolist())
+                if len(unique_labels) < 2 or len(unique_labels) >= len(X_test):
+                    raise ValueError("Clustering evaluation requires at least two non-trivial clusters.")
+                metrics = {"silhouette_score": float(silhouette_score(X_test, labels))}
+            elif "regression" in normalized_type:
                 metrics = {
                     "mae": float(mean_absolute_error(y_test, predictions)),
                     "rmse": float(root_mean_squared_error(y_test, predictions)),
@@ -172,6 +205,7 @@ def select_best_model(
     Select the best candidate using the task-specific primary metric.
 
     Regression: lowest RMSE.
+    Clustering: highest silhouette score.
     Classification: highest F1 score.
     """
 
@@ -192,7 +226,11 @@ def select_best_model(
             "selection_reason": "No valid models were available for selection.",
         }
 
-    if "regression" in normalized_type:
+    if "clustering" in normalized_type:
+        metric_name = "silhouette_score"
+        selector = max
+        reason = "highest silhouette_score"
+    elif "regression" in normalized_type:
         metric_name = "rmse"
         selector = min
         reason = "lowest rmse"

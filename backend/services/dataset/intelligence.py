@@ -347,6 +347,9 @@ def _matches_identifier_name(column_name: str) -> bool:
     if "postal" in normalized or "zip" in normalized:
         return False
 
+    if _looks_like_target_name(normalized):
+        return False
+
     identifier_patterns = [
         r"(?:row|order|customer|user|account|employee|transaction|invoice|ticket|shipment|session|product)[ _-]?(?:id|identifier|number|key|code)",
         r"(?:row|order|customer|user|account|employee|transaction|invoice|ticket|shipment|session|product)(?:id|identifier|number|key|code)",
@@ -355,6 +358,23 @@ def _matches_identifier_name(column_name: str) -> bool:
     ]
 
     return any(re.search(pattern, normalized) for pattern in identifier_patterns)
+
+
+def _looks_like_target_name(column_name: str) -> bool:
+    """Return True when a column name strongly suggests a supervised target."""
+
+    normalized = re.sub(r"[^a-z0-9]+", " ", str(column_name).lower()).strip()
+    if not normalized:
+        return False
+
+    normalized = normalized.replace(" ", "_")
+    target_tokens = [
+        "target", "label", "class", "outcome", "result", "status", "income",
+        "sales", "price", "cost", "amount", "value", "revenue", "profit",
+        "score", "rating", "stroke", "churn", "exited", "purchase",
+        "default", "risk", "loan", "disease", "approved", "survived",
+    ]
+    return any(re.search(rf"(^|_){re.escape(token)}($|_)", normalized) for token in target_tokens)
 
 
 def _matches_identifier_data(
@@ -416,6 +436,9 @@ def _evaluate_identifier_column(
         return {"is_identifier": False, "details": details}
 
     normalized = re.sub(r"[^a-z0-9]+", " ", str(column_name).lower()).strip()
+    if _looks_like_target_name(normalized):
+        details["reasons"].append("target_like_name")
+        return {"is_identifier": False, "details": details}
     if _looks_like_measurement_column(normalized):
         details["reasons"].append("measurement_column")
         return {"is_identifier": False, "details": details}

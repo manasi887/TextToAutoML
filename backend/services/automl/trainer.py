@@ -183,6 +183,63 @@ def prepare_training_data(df: pd.DataFrame, target_column: str) -> Dict[str, obj
       }
 
 
+def prepare_clustering_data(df: pd.DataFrame) -> Dict[str, object]:
+      """Prepare feature data for unsupervised clustering without a target column."""
+      if not isinstance(df, pd.DataFrame):
+          raise TypeError("df must be a pandas DataFrame")
+      if df.empty:
+          raise ValueError("Input dataset is empty.")
+
+      working_df = df.copy()
+      from services.dataset.intelligence import detect_identifier_columns, detect_constant_columns
+
+      identifier_cols = detect_identifier_columns(working_df).get("identifier_columns", [])
+      constant_cols = detect_constant_columns(working_df).get("constant_columns", [])
+      columns_to_drop = [column for column in identifier_cols + constant_cols if column in working_df.columns]
+      X = working_df.drop(columns=columns_to_drop, errors="ignore")
+
+      numeric_columns = X.select_dtypes(include=["number"]).columns.tolist()
+      numeric_imputation_values: Dict[str, float] = {}
+      for column in numeric_columns:
+          if X[column].isna().any():
+              fill_value = float(X[column].mean())
+              X[column] = X[column].fillna(fill_value)
+              numeric_imputation_values[column] = fill_value
+
+      categorical_columns = X.select_dtypes(include=["object", "string", "category"]).columns.tolist()
+      categorical_imputation_values: Dict[str, Any] = {}
+      for column in categorical_columns:
+          if X[column].isna().any():
+              mode_values = X[column].mode(dropna=True)
+              fill_value = mode_values.iloc[0] if not mode_values.empty else "<missing>"
+              X[column] = X[column].fillna(fill_value)
+              categorical_imputation_values[column] = fill_value
+
+      encoded_X, encoders = encode_features(X)
+      return {
+          "X": encoded_X.reset_index(drop=True),
+          "feature_names": encoded_X.columns.tolist(),
+          "encoders": encoders,
+          "preprocessing": {
+              "removed_columns": {
+                  "identifier_columns": identifier_cols,
+                  "constant_columns": constant_cols,
+              },
+              "imputed_columns": {
+                  "numeric": numeric_columns,
+                  "categorical": categorical_columns,
+              },
+              "raw_feature_names": X.columns.tolist(),
+              "imputation_values": {
+                  "numeric": numeric_imputation_values,
+                  "categorical": categorical_imputation_values,
+              },
+              "target_column": None,
+              "target_encoded": False,
+          },
+      }
+
+
 def _fill_missing_values(df: pd.DataFrame) -> None:
     numeric_columns = df.select_dtypes(include=["number"]).columns
     for column in numeric_columns:
@@ -199,7 +256,7 @@ def _fill_missing_values(df: pd.DataFrame) -> None:
 
 def _is_categorical_series(series: pd.Series) -> bool:
     return (
-        pd.api.types.is_categorical_dtype(series)
+        isinstance(series.dtype, pd.CategoricalDtype)
         or pd.api.types.is_string_dtype(series)
         or pd.api.types.is_object_dtype(series)
         or pd.api.types.is_bool_dtype(series)
@@ -321,7 +378,7 @@ def split_dataset(X: pd.DataFrame, y: pd.Series, test_size: float = 0.2, problem
     else:
         # Heuristic: treat as classification if y is non-numeric or low-cardinality
         try:
-            if pd.api.types.is_object_dtype(y) or pd.api.types.is_bool_dtype(y) or pd.api.types.is_categorical_dtype(y):
+            if pd.api.types.is_object_dtype(y) or pd.api.types.is_bool_dtype(y) or isinstance(y.dtype, pd.CategoricalDtype):
                 stratify = y
             else:
                 # numeric: if very few unique values relative to rows, treat as classification

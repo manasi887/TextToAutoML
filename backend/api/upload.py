@@ -1,4 +1,7 @@
 from pathlib import Path
+
+from config import UPLOAD_DIR
+
 from services.dataset.analyze import analyze_dataset_df
 from services.dataset.loader import load_dataset
 from services.dataset.preprocess import preprocess_dataset
@@ -12,10 +15,6 @@ router = APIRouter(
     prefix="/upload",
     tags=["Dataset Upload"]
 )
-
-# Folder where uploaded datasets will be stored
-UPLOAD_DIR = Path("storage/uploads")
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @router.post("/")

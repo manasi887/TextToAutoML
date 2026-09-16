@@ -200,7 +200,7 @@ def test_detect_target_candidates_prioritizes_binary_numeric_outcome_over_multic
     assert detect_problem_type(df, "stroke")["problem_type"] == "Binary Classification"
 
 
-def test_detect_target_candidates_requires_confirmation_for_ambiguous_numeric_targets():
+def test_detect_target_candidates_prefers_house_value_over_generic_income():
     df = pd.DataFrame(
         {
             "median_income": [3.1, 2.8, 4.2, 5.1, 3.6, 2.9, 4.8, 5.4],
@@ -212,7 +212,9 @@ def test_detect_target_candidates_requires_confirmation_for_ambiguous_numeric_ta
     report = detect_target_candidates(df)
 
     assert report["status"] == "Completed"
-    assert report["requires_user_confirmation"] is True
+    assert report["recommended_target"] == "median_house_value"
+    assert report["target_candidates"][0]["column"] == "median_house_value"
+    assert report["requires_user_confirmation"] is False
 
 
 def test_detect_problem_type_returns_multiclass_classification_for_categorical_target():
@@ -286,6 +288,23 @@ def test_generate_automl_recommendation_compiles_report():
     assert "Consider using 'Sales' as the target column" in report["recommendations"]
     assert isinstance(report["dataset_intelligence"], dict)
     assert isinstance(report["problem_detection"], dict)
+
+
+def test_generate_automl_recommendation_keeps_target_like_columns_out_of_identifier_detection():
+    df = pd.DataFrame(
+        {
+            "feature_1": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "feature_2": [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+            "target": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+        }
+    )
+
+    report = generate_automl_recommendation(df)
+
+    assert report["status"] == "Completed"
+    assert report["problem_type"] == "Regression"
+    assert report["recommended_target"] == "target"
+    assert "target" not in report["dataset_intelligence"]["identifier_columns"]["identifier_columns"]
 
 
 def test_generate_automl_recommendation_handles_no_candidates():

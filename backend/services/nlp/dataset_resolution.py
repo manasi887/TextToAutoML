@@ -57,11 +57,47 @@ def _candidate_is_clear(target_report: dict[str, Any]) -> bool:
     candidates = target_report.get("target_candidates", [])
     if not candidates or target_report.get("requires_user_confirmation", False):
         return False
-    if len(candidates) == 1:
-        return True
+    return True
+
+
+def _filter_candidates_by_problem_type(
+    candidates: list[Any], nlp_type: str | None, df: pd.DataFrame
+) -> tuple[list[Any], bool]:
+    """Keep only candidates whose observed data type matches the NLP intent."""
+    if nlp_type not in {"classification", "regression"}:
+        return candidates, False
+
+    compatible_candidates: list[Any] = []
+    for candidate in candidates:
+        column = candidate.get("column") if isinstance(candidate, dict) else None
+        if not isinstance(column, str) or column not in df.columns:
+            continue
+        problem_type = str(detect_problem_type(df, column).get("problem_type", ""))
+        if _compatible(nlp_type, problem_type):
+            compatible_candidates.append(candidate)
+
+    return compatible_candidates, len(compatible_candidates) != len(candidates)
+
+
+def _set_filtered_confirmation(
+    target_report: dict[str, Any], candidates: list[Any], was_filtered: bool
+) -> None:
+    """Recompute ambiguity after incompatible candidates have been removed."""
+    if not was_filtered:
+        return
+    if len(candidates) < 2:
+        target_report["requires_user_confirmation"] = False
+        return
     top_score = float(candidates[0].get("score", 0.0))
     second_score = float(candidates[1].get("score", 0.0))
-    return top_score - second_score >= _CLEAR_TARGET_MARGIN
+    target_report["requires_user_confirmation"] = top_score - second_score < _CLEAR_TARGET_MARGIN
+
+
+def _unresolved_problem_type(nlp_type: str | None) -> str:
+    """Keep a supervised intent visible while its target still needs clarification."""
+    if nlp_type == "classification":
+        return "Classification"
+    return "Regression" if nlp_type == "regression" else "Clustering"
 
 
 def _result(
@@ -111,6 +147,9 @@ def resolve_dataset_context(
     candidates = target_report.get("target_candidates", [])
     if not isinstance(candidates, list):
         candidates = []
+    candidates, was_filtered = _filter_candidates_by_problem_type(candidates, nlp_type, df)
+    target_report["target_candidates"] = candidates
+    _set_filtered_confirmation(target_report, candidates, was_filtered)
 
     if nlp_type == "clustering" and not intent_needs_clarification and not target_is_clear:
         return _result(
@@ -162,7 +201,7 @@ def resolve_dataset_context(
     if intent_needs_clarification or nlp_type in {None, "unknown"}:
         return _result(
             None,
-            "Clustering",
+            _unresolved_problem_type(nlp_type),
             0.0,
             candidates,
             True,
@@ -172,7 +211,7 @@ def resolve_dataset_context(
     if not candidates:
         return _result(
             None,
-            "Clustering",
+            _unresolved_problem_type(nlp_type),
             0.0,
             candidates,
             True,
@@ -182,7 +221,7 @@ def resolve_dataset_context(
     if not _candidate_is_clear(target_report):
         return _result(
             None,
-            "Clustering",
+            _unresolved_problem_type(nlp_type),
             0.0,
             candidates,
             True,
@@ -194,7 +233,7 @@ def resolve_dataset_context(
     if not isinstance(candidate_column, str):
         return _result(
             None,
-            "Clustering",
+            _unresolved_problem_type(nlp_type),
             0.0,
             candidates,
             True,

@@ -31,7 +31,7 @@ def process_nlp_request(user_text: str, df: pd.DataFrame) -> dict[str, Any]:
     }
     if target_extraction["target_found"]:
         target_result = match_target_column(target_extraction["target_reference"], df)
-        target_result["target_found"] = True
+        target_result["target_found"] = target_result["matched_column"] is not None
 
     supervised_target_required = task_result["problem_type"] in {
         "classification",

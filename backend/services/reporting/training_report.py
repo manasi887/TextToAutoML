@@ -121,6 +121,8 @@ def generate_training_report(
             selection_metric,
         ),
         "model_id": _json_safe(model.get("model_id")),
+        "run": _json_safe(automl_training.get("run")),
+        "comparison": _json_safe(automl_training.get("comparison")),
         "task": {
             "target": _json_safe(target_column),
             "problem_type": problem_type,

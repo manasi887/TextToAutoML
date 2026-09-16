@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from main import app
+from config import UPLOAD_DIR
 
 
 client = TestClient(app)
@@ -15,9 +16,8 @@ client = TestClient(app)
 
 @pytest.fixture
 def upload_dir():
-    upload_dir = Path(__file__).resolve().parents[1] / "backend" / "storage" / "uploads"
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    return upload_dir
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    return UPLOAD_DIR
 
 
 def _make_regression_dataset(path: Path) -> None:

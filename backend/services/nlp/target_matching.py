@@ -34,6 +34,13 @@ _PREDICTIVE_PATTERNS = [
     (re.compile(r"\b(?:number|count|amount)\s+of\s+"), ""),
 ]
 
+_SEMANTIC_TARGET_ALIASES = {
+    "house price": ("house price", "house value", "price", "value"),
+    "house prices": ("house price", "house value", "price", "value"),
+    "value of each house": ("house value", "value"),
+    "value of a house": ("house value", "value"),
+}
+
 
 def _normalize(value: Any) -> str:
     """Normalize a target or column name without changing the source value."""
@@ -55,6 +62,11 @@ def _extract_keywords(target: str) -> str:
     
     # Return space-separated keywords
     return " ".join(keywords) if keywords else target
+
+
+def _semantic_aliases(target: str) -> tuple[str, ...]:
+    """Return a small allowlist of target phrase aliases."""
+    return _SEMANTIC_TARGET_ALIASES.get(target, ())
 
 
 def _score_match(target: str, column: str) -> float:
@@ -105,6 +117,7 @@ def match_target_column(target_reference: str, df: pd.DataFrame) -> dict[str, An
 
     normalized_target = _normalize(target_reference)
     keyword_target = _extract_keywords(normalized_target)
+    semantic_targets = _semantic_aliases(normalized_target)
     
     scored_candidates: list[dict[str, Any]] = []
     for original_column in df.columns:
@@ -113,9 +126,13 @@ def match_target_column(target_reference: str, df: pd.DataFrame) -> dict[str, An
         # Try both normalized and keyword-extracted versions
         score_normalized = _score_match(normalized_target, normalized_column)
         score_keywords = _score_match(keyword_target, normalized_column)
+        score_semantic = max(
+            (_score_match(alias, normalized_column) for alias in semantic_targets),
+            default=0.0,
+        )
         
         # Use the better score
-        score = max(score_normalized, score_keywords)
+        score = max(score_normalized, score_keywords, score_semantic)
         
         if score >= MIN_CANDIDATE_SCORE:
             scored_candidates.append(

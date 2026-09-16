@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -52,7 +52,7 @@ def save_model_package(
         "model_name": model_name,
         "selection_metric": selection_metric,
         "metrics": metrics,
-        "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
     }
 
     joblib.dump(package, model_path)

@@ -84,6 +84,29 @@ def test_convert_date_columns_parses_valid_date_strings():
     assert report["details"]["date_columns_nat_count"] == 0
 
 
+def test_convert_date_columns_parses_mixed_date_formats():
+    df = pd.DataFrame(
+        {
+            "Order Date": ["2024-01-01", "01/02/2024", "2024-01-03", "01/04/2024"],
+            "value": [10, 20, 30, 40],
+        }
+    )
+
+    cleaned_df, report = convert_date_columns(df)
+
+    assert pd.api.types.is_datetime64_any_dtype(cleaned_df["Order Date"])
+    assert cleaned_df["Order Date"].tolist() == [
+        pd.Timestamp("2024-01-01"),
+        pd.Timestamp("2024-01-02"),
+        pd.Timestamp("2024-01-03"),
+        pd.Timestamp("2024-01-04"),
+    ]
+    assert report["status"] == "Completed"
+    assert report["details"]["date_columns_detected"] == ["Order Date"]
+    assert report["details"]["date_columns_converted"] == ["Order Date"]
+    assert report["details"]["date_columns_nat_count"] == 0
+
+
 def test_convert_date_columns_ignores_malformed_date_strings():
     df = pd.DataFrame(
         {

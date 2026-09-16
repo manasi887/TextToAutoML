@@ -6,8 +6,8 @@ import pandas as pd
 
 from services.automl.persistence import save_model_package
 from services.automl.problem_detection import detect_problem_type
-from services.automl.trainer import prepare_training_data, split_dataset
-from services.automl.training import evaluate_models, select_best_model, train_models
+from services.automl.trainer import prepare_clustering_data, prepare_training_data, split_dataset
+from services.automl.training import evaluate_models, select_best_model, train_clustering_models, train_models
 
 
 _SUPPORTED_PROBLEM_TYPES = {
@@ -15,6 +15,7 @@ _SUPPORTED_PROBLEM_TYPES = {
     "multi-class classification",
     "multi class classification",
     "regression",
+    "clustering",
 }
 
 
@@ -85,13 +86,55 @@ def run_automl_pipeline(
     if df is None or df.empty:
         raise ValueError("Input dataset is empty.")
 
-    if target_column is None or str(target_column).strip() == "":
+    if target_column is None and str(problem_type or "").strip().lower() != "clustering":
         raise ValueError("A target column must be explicitly supplied to the AutoML pipeline.")
 
-    if target_column not in df.columns:
+    if str(problem_type or "").strip().lower() != "clustering" and target_column not in df.columns:
         raise ValueError(f"Target column '{target_column}' is not present in the DataFrame.")
 
-    normalized_problem_type = _normalize_problem_type(problem_type, df, target_column)
+    normalized_problem_type = "Clustering" if str(problem_type or "").strip().lower() == "clustering" else _normalize_problem_type(problem_type, df, target_column)
+
+    if normalized_problem_type == "Clustering":
+        preparation = prepare_clustering_data(df)
+        X = preparation["X"]
+        feature_names = preparation["feature_names"]
+        encoders = preparation["encoders"]
+        if X.empty or X.shape[1] == 0:
+            raise ValueError("No usable features remain for clustering after preprocessing.")
+        training_report = train_clustering_models(X)
+        trained_models = training_report.get("trained_models", {})
+        training_errors = training_report.get("training_errors", [])
+        evaluation = evaluate_models(trained_models, X, pd.Series(index=X.index, dtype=float), normalized_problem_type)
+        evaluation_results = evaluation.get("results", [])
+        if not evaluation_results:
+            raise ValueError("No clustering model produced a valid evaluation.")
+        best_model_report = select_best_model(evaluation_results, normalized_problem_type)
+        best_model = best_model_report["best_model"]
+        best_name = best_model_report["best_model_name"]
+        metrics = best_model_report["best_metrics"]
+        packaged_model = save_model_package(
+            model=best_model,
+            encoders=encoders,
+            feature_names=feature_names,
+            target_column="",
+            problem_type=normalized_problem_type,
+            preprocessing={**preparation["preprocessing"], "feature_names": feature_names, "encoders": encoders},
+            model_name=best_name,
+            selection_metric="silhouette_score",
+            metrics=metrics,
+        )
+        return {
+            "status": "success",
+            "target_column": None,
+            "problem_type": normalized_problem_type,
+            "data": {"original_rows": int(len(df)), "original_columns": int(len(df.columns)), "training_rows": int(len(X)), "test_rows": 0, "feature_count": int(X.shape[1])},
+            "preprocessing": {**preparation["preprocessing"], "feature_names": feature_names, "encoders": encoders},
+            "models": {"trained": list(trained_models), "failed": training_errors},
+            "evaluation": {"status": evaluation.get("status", "Completed"), "results": evaluation_results, "errors": evaluation.get("errors", [])},
+            "best_model": {"name": best_name, "selection_metric": "silhouette_score", "metrics": metrics, "reason": best_model_report["selection_reason"]},
+            "model": {"model_id": packaged_model["model_id"], "name": packaged_model["model_name"], "problem_type": normalized_problem_type, "target_column": None, "selection_metric": "silhouette_score", "metrics": metrics},
+            "_internal_best_model": best_model,
+        }
 
     preparation = _prepare_training_features(df, target_column)
     X = preparation["X"]

@@ -129,6 +129,33 @@ def handle_missing_values(df: pd.DataFrame, copy_df: bool = True):
 # DATE PROCESSING FUNCTIONS
 # ==========================================================
 
+def _parse_datetime_series(series, dayfirst=False):
+    """
+    Parse a datetime-like series using pandas' mixed-format support when available,
+    with a conservative fallback to the legacy inference strategies.
+    """
+
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Could not infer format, so each element will be parsed individually"
+            )
+            return pd.to_datetime(
+                series,
+                errors="coerce",
+                format="mixed",
+                dayfirst=dayfirst,
+            )
+    except (TypeError, ValueError):
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Could not infer format, so each element will be parsed individually"
+            )
+            return pd.to_datetime(series, errors="coerce", dayfirst=dayfirst)
+
+
 def _get_datetime_columns(df: pd.DataFrame):
     """
     Return columns that are datetime-like in a DataFrame.
@@ -164,38 +191,21 @@ def _get_datetime_columns(df: pd.DataFrame):
         if non_null_values.empty:
             continue
 
-        # Sample up to the first N non-null values to limit cost and keep behavior deterministic
         sample = non_null_values.iloc[:sample_limit]
 
-        # Try parsing without forcing dayfirst; let pandas infer formats
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message="Could not infer format, so each element will be parsed individually"
-            )
-            parsed_default = pd.to_datetime(sample, errors="coerce")
+        parsed_mixed = _parse_datetime_series(sample)
+        parsed_count_mixed = int(parsed_mixed.notna().sum())
+        parsed_ratio_mixed = parsed_count_mixed / float(len(sample)) if len(sample) else 0.0
 
-        parsed_count_default = int(parsed_default.notna().sum())
-        parsed_ratio_default = parsed_count_default / float(len(sample)) if len(sample) else 0.0
-
-        # If default parsing already parses most samples, accept column
-        if parsed_ratio_default >= parse_threshold:
+        if parsed_ratio_mixed >= parse_threshold:
             datetime_columns.append(column)
             continue
 
-        # Otherwise, try the alternative dayfirst=True parsing as a fallback
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message="Could not infer format, so each element will be parsed individually"
-            )
-            parsed_dayfirst = pd.to_datetime(sample, errors="coerce", dayfirst=True)
-
+        parsed_dayfirst = _parse_datetime_series(sample, dayfirst=True)
         parsed_count_dayfirst = int(parsed_dayfirst.notna().sum())
         parsed_ratio_dayfirst = parsed_count_dayfirst / float(len(sample)) if len(sample) else 0.0
 
-        # Accept if either strategy yields a sufficiently high parsing ratio
-        if max(parsed_ratio_default, parsed_ratio_dayfirst) >= parse_threshold:
+        if parsed_ratio_dayfirst >= parse_threshold:
             datetime_columns.append(column)
 
     return datetime_columns
@@ -216,18 +226,8 @@ def convert_date_columns(df: pd.DataFrame, copy_df: bool = True):
 
     for column in date_columns:
         try:
-            # First, attempt natural inference without forcing dayfirst
-            with warnings.catch_warnings():
-                warnings.filterwarnings(
-                    "ignore",
-                    message="Could not infer format, so each element will be parsed individually"
-                )
-                parsed_default = pd.to_datetime(
-                                    cleaned_df[column],
-                                    errors="coerce",
-                                )
+            parsed_default = _parse_datetime_series(cleaned_df[column])
 
-            # If default parsing yields meaningful non-null values, accept it
             if parsed_default.notna().any():
                 cleaned_df[column] = parsed_default
                 nat_count = int(cleaned_df[column].isna().sum())
@@ -235,17 +235,7 @@ def convert_date_columns(df: pd.DataFrame, copy_df: bool = True):
                 converted_columns.append(column)
                 continue
 
-            # Fallback: try dayfirst=True if default parsing parsed almost nothing
-            with warnings.catch_warnings():
-                warnings.filterwarnings(
-                    "ignore",
-                    message="Could not infer format, so each element will be parsed individually"
-                )
-                parsed_dayfirst = pd.to_datetime(
-                                    cleaned_df[column],
-                                    errors="coerce",
-                                    dayfirst=True
-                                )
+            parsed_dayfirst = _parse_datetime_series(cleaned_df[column], dayfirst=True)
 
             if parsed_dayfirst.notna().any():
                 cleaned_df[column] = parsed_dayfirst
@@ -253,7 +243,6 @@ def convert_date_columns(df: pd.DataFrame, copy_df: bool = True):
                 total_nat_count += nat_count
                 converted_columns.append(column)
             else:
-                # Track NaT count even when conversion fails
                 nat_count = int(parsed_dayfirst.isna().sum())
                 total_nat_count += nat_count
                 failed_columns.append(
@@ -327,36 +316,16 @@ def extract_date_features(df: pd.DataFrame, copy_df: bool = True):
 
         date_series = updated_df[column]
         if not pd.api.types.is_datetime64_any_dtype(date_series):
-            with warnings.catch_warnings():
-                warnings.filterwarnings(
-                    "ignore",
-                    message="Could not infer format, so each element will be parsed individually"
-                )
-                # Let pandas infer formats naturally first
-                parsed_default = pd.to_datetime(
-                                    date_series,
-                                    errors="coerce",
-                                )
+            parsed_default = _parse_datetime_series(date_series)
 
             if parsed_default.notna().any():
                 date_series = parsed_default
             else:
-                # Fallback to dayfirst=True only if default parsing yielded almost nothing
-                with warnings.catch_warnings():
-                    warnings.filterwarnings(
-                        "ignore",
-                        message="Could not infer format, so each element will be parsed individually"
-                    )
-                    parsed_dayfirst = pd.to_datetime(
-                                            date_series,
-                                            errors="coerce",
-                                            dayfirst=True,
-                                        )
+                parsed_dayfirst = _parse_datetime_series(date_series, dayfirst=True)
 
                 if parsed_dayfirst.notna().any():
                     date_series = parsed_dayfirst
                 else:
-                    # Keep the default parsed series (likely all NaT) to preserve behavior
                     date_series = parsed_default
 
         updated_df[year_col] = date_series.dt.year
@@ -441,28 +410,10 @@ def calculate_delivery_time(df: pd.DataFrame, copy_df: bool = True):
     ship_series = updated_df[ship_column]
 
     if not pd.api.types.is_datetime64_any_dtype(order_series):
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message="Could not infer format, so each element will be parsed individually"
-            )
-            order_series = pd.to_datetime(
-                order_series,
-                errors="coerce",
-                dayfirst=True
-            )
+        order_series = _parse_datetime_series(order_series, dayfirst=True)
 
     if not pd.api.types.is_datetime64_any_dtype(ship_series):
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message="Could not infer format, so each element will be parsed individually"
-            )
-            ship_series = pd.to_datetime(
-                ship_series,
-                errors="coerce",
-                dayfirst=True
-            )
+        ship_series = _parse_datetime_series(ship_series, dayfirst=True)
 
     delivery_series = (ship_series - order_series).dt.days
     negative_delivery_days = int(delivery_series.lt(0).sum())

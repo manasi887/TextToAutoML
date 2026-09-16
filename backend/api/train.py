@@ -5,6 +5,8 @@ import numpy as np
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 
+from config import UPLOAD_DIR
+
 from services.automl.pipeline import run_automl_pipeline
 from services.dataset.loader import load_dataset
 from services.dataset.validator import validate_dataset_df
@@ -13,9 +15,6 @@ router = APIRouter(
     prefix="/train",
     tags=["Model Training"],
 )
-
-UPLOAD_DIR = (Path(__file__).resolve().parents[1] / "storage" / "uploads").resolve()
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class TrainRequest(BaseModel):

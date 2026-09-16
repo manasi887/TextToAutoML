@@ -79,6 +79,9 @@ class DatasetResolutionTests(unittest.TestCase):
         self.assertFalse(result["needs_clarification"])
 
     def test_ambiguous_candidates_require_clarification(self) -> None:
+        dataframe = pd.DataFrame(
+            {"target": [0, 1, 0], "feature": [1, 0, 1]}
+        )
         nlp_result = {
             "intent": {"intent": "classification"},
             "intent_analysis": {"needs_clarification": False},
@@ -97,7 +100,7 @@ class DatasetResolutionTests(unittest.TestCase):
             "services.nlp.dataset_resolution.detect_target_candidates",
             return_value=target_report,
         ):
-            result = resolve_dataset_context(nlp_result, self.dataframe)
+            result = resolve_dataset_context(nlp_result, dataframe)
 
         self.assertIsNone(result["target_column"])
         self.assertTrue(result["needs_clarification"])
@@ -220,6 +223,70 @@ class DatasetResolutionTests(unittest.TestCase):
         self.assertEqual(result["problem_type"], "Binary Classification")
         self.assertFalse(result["needs_clarification"])
 
+    def test_classification_filters_incompatible_candidates_by_actual_type(self) -> None:
+        dataframe = pd.DataFrame(
+            {
+                "target_flag": [0, 1, 0, 1],
+                "risk_score_leak": [0.2, 0.8, 0.4, 0.9],
+                "has_cc": [1, 0, 1, 1],
+            }
+        )
+        nlp_result = {
+            "intent": {"intent": "classification"},
+            "intent_analysis": {"needs_clarification": False},
+            "task": {"problem_type": "classification"},
+            "target": {"matched_column": None, "needs_clarification": True},
+        }
+        target_report = {
+            "target_candidates": [
+                {"column": "target_flag", "score": 13.25},
+                {"column": "risk_score_leak", "score": 12.25},
+                {"column": "has_cc", "score": 8.5},
+            ],
+            "requires_user_confirmation": True,
+        }
+
+        with patch(
+            "services.nlp.dataset_resolution.detect_target_candidates",
+            return_value=target_report,
+        ):
+            result = resolve_dataset_context(nlp_result, dataframe)
+
+        self.assertEqual(result["target_column"], "target_flag")
+        self.assertEqual(result["problem_type"], "Binary Classification")
+        self.assertFalse(result["needs_clarification"])
+
+    def test_two_compatible_classification_candidates_remain_ambiguous(self) -> None:
+        dataframe = pd.DataFrame(
+            {
+                "first_flag": [0, 1, 0, 1],
+                "second_flag": [1, 1, 0, 0],
+            }
+        )
+        nlp_result = {
+            "intent": {"intent": "classification"},
+            "intent_analysis": {"needs_clarification": False},
+            "task": {"problem_type": "classification"},
+            "target": {"matched_column": None, "needs_clarification": True},
+        }
+        target_report = {
+            "target_candidates": [
+                {"column": "first_flag", "score": 8.0},
+                {"column": "second_flag", "score": 7.5},
+            ],
+            "requires_user_confirmation": True,
+        }
+
+        with patch(
+            "services.nlp.dataset_resolution.detect_target_candidates",
+            return_value=target_report,
+        ):
+            result = resolve_dataset_context(nlp_result, dataframe)
+
+        self.assertIsNone(result["target_column"])
+        self.assertEqual(result["problem_type"], "Classification")
+        self.assertTrue(result["needs_clarification"])
+
     def test_dominant_candidate_without_confirmation_flag_resolves(self) -> None:
         nlp_result = {
             "intent": {"intent": "classification"},
@@ -266,6 +333,80 @@ class DatasetResolutionTests(unittest.TestCase):
         self.assertEqual(result["problem_type"], "Clustering")
         detect_problem_type_mock.assert_not_called()
         self.assertFalse(result["needs_clarification"])
+
+    def test_generic_columns_resolve_when_request_names_exact_target(self) -> None:
+        dataframe = pd.DataFrame(
+            {
+                "col_1": [10.0, 20.0, 30.0, 40.0],
+                "col_2": [1.0, 2.0, 3.0, 4.0],
+                "col_3": [100.0, 200.0, 300.0, 400.0],
+            }
+        )
+        nlp_result = {
+            "intent": {"intent": "regression"},
+            "intent_analysis": {"needs_clarification": False},
+            "task": {"problem_type": "regression"},
+            "target": {
+                "matched_column": "col_2",
+                "confidence": 1.0,
+                "needs_clarification": False,
+            },
+            "needs_clarification": False,
+        }
+
+        result = resolve_dataset_context(nlp_result, dataframe)
+
+        self.assertEqual(result["target_column"], "col_2")
+        self.assertEqual(result["problem_type"], "Regression")
+        self.assertFalse(result["needs_clarification"])
+
+    def test_generic_columns_require_clarification_when_candidates_are_ambiguous(self) -> None:
+        dataframe = pd.DataFrame(
+            {
+                "col_1": [10.0, 20.0, 30.0, 40.0],
+                "col_2": [100.0, 200.0, 300.0, 400.0],
+                "col_3": [1000.0, 2000.0, 3000.0, 4000.0],
+            }
+        )
+        nlp_result = {
+            "intent": {"intent": "regression"},
+            "intent_analysis": {"needs_clarification": False},
+            "task": {"problem_type": "regression"},
+            "target": {"matched_column": None, "needs_clarification": True},
+            "needs_clarification": True,
+        }
+
+        result = resolve_dataset_context(nlp_result, dataframe)
+
+        self.assertIsNone(result["target_column"])
+        self.assertTrue(result["needs_clarification"])
+        self.assertEqual(result["problem_type"], "Regression")
+        self.assertGreaterEqual(len(result["candidates"]), 2)
+
+    def test_unresolved_regression_target_keeps_regression_problem_type(self) -> None:
+        nlp_result = {
+            "intent": {"intent": "regression"},
+            "intent_analysis": {"needs_clarification": False},
+            "task": {"problem_type": "regression"},
+            "target": {"matched_column": None, "needs_clarification": True},
+        }
+        target_report = {
+            "target_candidates": [
+                {"column": "first_value", "score": 5.0},
+                {"column": "second_value", "score": 4.8},
+            ],
+            "requires_user_confirmation": True,
+        }
+
+        with patch(
+            "services.nlp.dataset_resolution.detect_target_candidates",
+            return_value=target_report,
+        ):
+            result = resolve_dataset_context(nlp_result, self.dataframe)
+
+        self.assertIsNone(result["target_column"])
+        self.assertEqual(result["problem_type"], "Regression")
+        self.assertTrue(result["needs_clarification"])
 
 
 if __name__ == "__main__":

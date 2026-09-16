@@ -86,3 +86,37 @@ def test_does_not_estimate_when_clarification_is_required():
     estimate_mock.assert_not_called()
     assert result["ready_for_training"] is False
     assert result["training_time_estimate"] is None
+
+
+def test_house_prices_resolves_to_regression_target():
+    df = pd.DataFrame(
+        {
+            "median_income": [3.1, 2.8, 4.2, 5.1],
+            "median_house_value": [220000, 250000, 300000, 310000],
+        }
+    )
+    intent_result = {
+        "intent": "regression",
+        "confidence": 0.9,
+        "probabilities": {"classification": 0.05, "regression": 0.9, "clustering": 0.05},
+    }
+
+    with patch("services.nlp.pipeline.detect_user_intent", return_value=intent_result), patch(
+        "services.nlp.pipeline.analyze_intent_confidence",
+        return_value={"needs_clarification": False},
+    ), patch(
+        "services.nlp.pipeline.map_intent_to_task",
+        return_value={"problem_type": "regression", "clarification_required": False},
+    ), patch(
+        "services.nlp.pipeline.estimate_training_time",
+        return_value={"estimated_seconds": 3.0},
+    ):
+        result = process_nlp_request("Predict house prices", df)
+
+    assert result["target"]["target_found"] is True
+    assert result["target"]["matched_column"] == "median_house_value"
+    assert result["target"]["needs_clarification"] is False
+    assert result["dataset_resolution"]["target_column"] == "median_house_value"
+    assert result["dataset_resolution"]["problem_type"] == "Regression"
+    assert result["needs_clarification"] is False
+    assert result["ready_for_training"] is True

@@ -82,14 +82,13 @@ def detect_target_candidates(
         if len(candidates) > 1:
             top_score = candidates[0]["score"]
             second_score = candidates[1]["score"]
-            if abs(top_score - second_score) < 2.0:
-                requires_confirmation = True
-            if (
-                candidates[0]["datatype"] == "numeric"
-                and candidates[1]["datatype"] == "numeric"
-                and "target_like_name" in candidates[0]["reasons"]
-                and "target_like_name" in candidates[1]["reasons"]
-            ):
+            top_name_strength = _target_name_strength(candidates[0]["column"])
+            second_name_strength = _target_name_strength(candidates[1]["column"])
+            has_specific_name_preference = (
+                top_name_strength >= 3
+                and top_name_strength > second_name_strength
+            )
+            if abs(top_score - second_score) < 2.0 and not has_specific_name_preference:
                 requires_confirmation = True
         if candidates[0]["confidence"] < 0.7:
             requires_confirmation = True
@@ -303,7 +302,7 @@ def _is_numeric_target_series(series: pd.Series) -> bool:
 
 def _is_categorical_target_series(series: pd.Series) -> bool:
     return (
-        pd.api.types.is_categorical_dtype(series)
+        isinstance(series.dtype, pd.CategoricalDtype)
         or pd.api.types.is_string_dtype(series)
         or pd.api.types.is_object_dtype(series)
     )
@@ -347,7 +346,7 @@ def _score_target_candidate(
         reasons.append("datetime_column")
 
     if target_name_signal > 0:
-        score += 0.75 + min(target_name_signal, 2) * 0.75
+        score += 0.75 + target_name_signal
         reasons.append("target_like_name")
 
     if datatype == "numeric":
@@ -431,8 +430,10 @@ def _target_name_strength(column_name: str) -> int:
     normalized = str(column_name).lower().replace(" ", "_")
     if re.search(r"(^|_)(target|label|class|outcome|result)(_|$)", normalized):
         return 4
-    if re.search(r"(^|_)(income|sales|price|value|revenue|profit)(_|$)", normalized):
+    if re.search(r"(^|_)(sales|price|value|revenue|profit)(_|$)", normalized):
         return 3
+    if re.search(r"(^|_)income(_|$)", normalized):
+        return 1
     if re.search(r"(^|_)(status)(_|$)", normalized):
         return 1
     if re.search(r"(^|_)(churn|exited|stroke|default|approved|purchased|survived|score|rating)(_|$)", normalized):
