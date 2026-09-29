@@ -38,8 +38,6 @@ def _validate_prediction_input(model_package: dict[str, Any], input_data: Any) -
             raise ValueError(f"Record at index {index} must be an object with feature names and values.")
 
     raw_df = pd.DataFrame(input_data)
-    if raw_df.empty:
-        raise ValueError("Prediction `data` cannot be empty.")
 
     expected_raw_columns = _resolve_raw_feature_names(model_package)
     required_columns = [str(column) for column in expected_raw_columns]
@@ -50,11 +48,36 @@ def _validate_prediction_input(model_package: dict[str, Any], input_data: Any) -
     if target_column and target_column in raw_df.columns:
         raise ValueError(f"The target column '{target_column}' must not be provided during prediction.")
 
-    missing_columns = [column for column in required_columns if column not in raw_df.columns]
-    if missing_columns:
-        raise ValueError(f"Missing required feature(s): {', '.join(missing_columns)}")
+    return raw_df.reindex(columns=required_columns).copy()
 
-    return raw_df[required_columns].copy()
+
+def _display_class_labels(model_package: dict[str, Any]) -> list[str]:
+    preprocessing = model_package.get("preprocessing", {}) or {}
+    classes = preprocessing.get("target_classes", [])
+    if not isinstance(classes, list) or not classes:
+        target_encoder = preprocessing.get("target_encoder")
+        classes = getattr(target_encoder, "classes_", [])
+    if not isinstance(classes, list) and not isinstance(classes, np.ndarray):
+        classes = []
+    classes = [value.item() if isinstance(value, np.generic) else value for value in classes]
+    if not isinstance(classes, list) or not classes:
+        model = model_package.get("model")
+        classes = getattr(model, "classes_", [])
+        if isinstance(classes, np.ndarray):
+            classes = classes.tolist()
+    if not classes and str(model_package.get("problem_type", "")).lower().find("classification") >= 0:
+        classes = [0, 1]
+
+    if len(classes) == 2 and set(classes) == {0, 1}:
+        target_column = str(model_package.get("target_column", "target")).strip()
+        normalized_target = target_column.replace("_", " ").strip()
+        if normalized_target.lower() == "churn":
+            positive_label = "Churned"
+        else:
+            positive_label = normalized_target.title() or "Positive"
+        return [f"Not {positive_label}", positive_label]
+
+    return [str(value) for value in classes]
 
 
 def _apply_missing_value_strategy(df: pd.DataFrame, model_package: dict[str, Any]) -> pd.DataFrame:
@@ -65,11 +88,16 @@ def _apply_missing_value_strategy(df: pd.DataFrame, model_package: dict[str, Any
 
     numeric_imputation = imputation_values.get("numeric", {}) or {}
     categorical_imputation = imputation_values.get("categorical", {}) or {}
+    encoders = model_package.get("encoders", {}) or {}
+    imputed_columns = preprocessing.get("imputed_columns", {}) or {}
+    categorical_columns = set(imputed_columns.get("categorical", []) or [])
 
     for column in df.columns:
+        if (column in encoders or column in categorical_columns) and df[column].isna().any() and column not in categorical_imputation:
+            continue
         if column in numeric_imputation:
             df[column] = df[column].fillna(numeric_imputation[column])
-        elif pd.api.types.is_numeric_dtype(df[column]):
+        elif column not in categorical_columns and pd.api.types.is_numeric_dtype(df[column]):
             if df[column].isna().any():
                 raise ValueError(
                     "The saved model package is missing training-time numeric imputation values for feature "
@@ -78,6 +106,10 @@ def _apply_missing_value_strategy(df: pd.DataFrame, model_package: dict[str, Any
 
         if column in categorical_imputation:
             df[column] = df[column].fillna(categorical_imputation[column])
+        elif column in encoders or column in categorical_columns:
+            # Older packages may not persist a categorical fill value; the saved
+            # encoder remains responsible for handling an unseen missing marker.
+            continue
         elif df[column].dtype == object or pd.api.types.is_string_dtype(df[column]) or isinstance(df[column].dtype, pd.CategoricalDtype):
             if df[column].isna().any():
                 raise ValueError(
@@ -180,5 +212,14 @@ def predict_with_model(model_package: dict[str, Any], input_data: Any) -> dict[s
             result["probabilities"] = _to_python_scalar(probabilities)
         except Exception:
             pass
+
+    class_labels = _display_class_labels(model_package)
+    if class_labels and len(class_labels) == len(set(class_labels)):
+        result["prediction_labels"] = [
+            class_labels[int(value)] if isinstance(value, (int, np.integer)) and 0 <= int(value) < len(class_labels) else str(value)
+            for value in prediction_list
+        ]
+        if "probabilities" in result:
+            result["probability_labels"] = class_labels
 
     return result

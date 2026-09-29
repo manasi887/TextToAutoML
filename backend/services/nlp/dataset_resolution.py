@@ -10,10 +10,12 @@ from services.automl.problem_detection import (
     detect_problem_type,
     detect_target_candidates,
 )
+from .target_matching import match_target_column
 
 
 _CLEAR_TARGET_MARGIN = 2.0
 _STRONG_TARGET_CONFIDENCE = 0.80
+_SEMANTIC_CANDIDATE_CONFIDENCE = 0.70
 
 
 def _json_safe(value: Any) -> Any:
@@ -107,11 +109,15 @@ def _result(
     candidates: list[Any],
     needs_clarification: bool,
     reason: str,
+    target_match_score: float = 0.0,
+    target_match_margin: float = 0.0,
 ) -> dict[str, Any]:
     return {
         "target_column": target_column,
         "problem_type": problem_type,
         "confidence": float(confidence),
+        "target_match_score": float(target_match_score),
+        "target_match_margin": float(target_match_margin),
         "candidates": _json_safe(candidates),
         "needs_clarification": bool(needs_clarification),
         "reason": reason,
@@ -142,6 +148,14 @@ def resolve_dataset_context(
         and target_column in df.columns
         and not target_result.get("needs_clarification", False)
     )
+    if (
+        target_is_clear
+        and target_result.get("match_type") == "hybrid"
+        and nlp_type in {"classification", "regression"}
+    ):
+        resolved_type = str(detect_problem_type(df, target_column).get("problem_type", ""))
+        if not _compatible(nlp_type, resolved_type):
+            target_is_clear = False
 
     target_report = _json_safe(detect_target_candidates(df))
     candidates = target_report.get("target_candidates", [])
@@ -150,6 +164,40 @@ def resolve_dataset_context(
     candidates, was_filtered = _filter_candidates_by_problem_type(candidates, nlp_type, df)
     target_report["target_candidates"] = candidates
     _set_filtered_confirmation(target_report, candidates, was_filtered)
+
+    target_reference = target_result.get("target_reference")
+    should_refine_explicit_target = (
+        isinstance(target_reference, str)
+        and bool(target_reference.strip())
+        and nlp_type in {"classification", "regression"}
+        and (
+            not target_is_clear
+            or target_result.get("match_type") == "hybrid"
+        )
+    )
+    if (
+        should_refine_explicit_target
+    ):
+        candidate_columns = [
+            candidate["column"]
+            for candidate in candidates
+            if isinstance(candidate, dict)
+            and isinstance(candidate.get("column"), str)
+            and float(candidate.get("confidence", 1.0)) >= _SEMANTIC_CANDIDATE_CONFIDENCE
+        ]
+        if candidate_columns:
+            refined_target = match_target_column(
+                target_reference,
+                df,
+                candidate_columns=candidate_columns,
+            )
+            target_result = refined_target
+            target_column = refined_target.get("matched_column")
+            target_is_clear = (
+                isinstance(target_column, str)
+                and target_column in df.columns
+                and not refined_target.get("needs_clarification", False)
+            )
 
     if nlp_type == "clustering" and not intent_needs_clarification and not target_is_clear:
         return _result(
@@ -196,6 +244,10 @@ def resolve_dataset_context(
                 if _compatible(nlp_type, dataset_type)
                 else "Used the strong explicit target and preferred its data-grounded problem type."
             ),
+            target_match_score=float(
+                target_result.get("score", target_result.get("confidence", 0.0))
+            ),
+            target_match_margin=float(target_result.get("margin", 0.0)),
         )
 
     if intent_needs_clarification or nlp_type in {None, "unknown"}:
@@ -216,6 +268,16 @@ def resolve_dataset_context(
             candidates,
             True,
             "No dataset target candidate was detected.",
+        )
+
+    if isinstance(target_reference, str) and target_reference.strip():
+        return _result(
+            None,
+            _unresolved_problem_type(nlp_type),
+            0.0,
+            candidates,
+            True,
+            "The requested target does not clearly match a single compatible dataset column.",
         )
 
     if not _candidate_is_clear(target_report):

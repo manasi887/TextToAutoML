@@ -7,7 +7,17 @@ import pandas as pd
 from services.automl.persistence import save_model_package
 from services.automl.problem_detection import detect_problem_type
 from services.automl.trainer import prepare_clustering_data, prepare_training_data, split_dataset
-from services.automl.training import evaluate_models, select_best_model, train_clustering_models, train_models
+from services.automl.training import (
+    evaluate_models,
+    evaluate_models_cv,
+    select_best_model,
+    train_clustering_models,
+    train_models,
+    tune_selected_model,
+)
+from services.metalearning.meta_features import extract_meta_features
+from services.metalearning.openml_loader import load_cached_openml_records
+from services.metalearning.recommender import recommend_models
 
 
 _SUPPORTED_PROBLEM_TYPES = {
@@ -155,7 +165,30 @@ def run_automl_pipeline(
         random_state=random_state,
     )
 
-    training_report = train_models(X_train, y_train, normalized_problem_type)
+    recommended_model_order: List[str] | None = None
+    try:
+        meta_features = extract_meta_features(
+            df,
+            target_column=target_column,
+            problem_type=normalized_problem_type,
+        )
+        openml_records = load_cached_openml_records()
+        recommendation = recommend_models(meta_features, openml_records=openml_records)
+        if recommendation.get("status") == "recommended":
+            recommended_model_order = [
+                item["model_family"]
+                for item in recommendation.get("recommendations", [])
+                if isinstance(item, dict) and isinstance(item.get("model_family"), str)
+            ] or None
+    except Exception:  # pragma: no cover - recommender must never block baseline training
+        recommended_model_order = None
+
+    training_report = train_models(
+        X_train,
+        y_train,
+        normalized_problem_type,
+        recommended_model_order=recommended_model_order,
+    )
     trained_models = training_report.get("trained_models", {})
     training_errors = training_report.get("training_errors", [])
 
@@ -185,6 +218,14 @@ def run_automl_pipeline(
             },
             "error": "All candidate models failed to train for the selected problem type.",
         }
+
+    cv_evaluation = evaluate_models_cv(trained_models, X_train, y_train, normalized_problem_type)
+    cv_results = cv_evaluation.get("results", [])
+    cv_best_model_report = None
+    if cv_results:
+        cv_best_model_report = select_best_model(cv_results, normalized_problem_type)
+        if cv_best_model_report.get("best_model") is not None:
+            cv_best_model_report["best_model"].fit(X_train, y_train)
 
     evaluation = evaluate_models(trained_models, X_test, y_test, normalized_problem_type)
     evaluation_results = evaluation.get("results", [])
@@ -221,7 +262,22 @@ def run_automl_pipeline(
             "error": "Evaluation produced no valid model results for the selected problem type.",
         }
 
-    best_model_report = select_best_model(evaluation_results, normalized_problem_type)
+    if cv_best_model_report is not None and cv_best_model_report.get("best_model") is not None:
+        best_model_report = cv_best_model_report
+        tuning = tune_selected_model(
+            best_model_report["best_model_name"],
+            best_model_report["best_model"],
+            X_train,
+            y_train,
+            normalized_problem_type,
+        )
+        if tuning.get("status") == "Completed":
+            best_model_report["best_model"] = tuning["model"]
+            best_model_report["best_metrics"] = tuning["metrics"]
+            best_model_report["best_model"].fit(X_train, y_train)
+    else:
+        best_model_report = select_best_model(evaluation_results, normalized_problem_type)
+
     if best_model_report.get("status") == "Failed" or best_model_report.get("best_model") is None:
         return {
             "status": "failed",

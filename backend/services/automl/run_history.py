@@ -10,6 +10,8 @@ from typing import Any
 
 import pandas as pd
 
+from services.metalearning.meta_features import extract_meta_features
+
 
 HISTORY_PATH = (
     Path(__file__).resolve().parents[2] / "storage" / "reports" / "training_history.json"
@@ -72,6 +74,11 @@ def record_training_run(
     problem_type = str(training_output.get("problem_type") or "")
     dataset_key = _dataset_key(df, dataset_name)
     run_id = str(model["model_id"])
+    meta_features = extract_meta_features(
+        df,
+        target_column=target_column if isinstance(target_column, str) else None,
+        problem_type=problem_type or None,
+    )
     timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
     target_path = Path(history_path) if history_path is not None else HISTORY_PATH
@@ -105,6 +112,7 @@ def record_training_run(
         "selection_metric": selection_metric,
         "metric_value": metric_value,
         "training_time_seconds": training_output.get("training_time_seconds"),
+        "meta_features": meta_features,
     }
     history.append(record)
     target_path.write_text(json.dumps(history, indent=2) + "\n", encoding="utf-8")

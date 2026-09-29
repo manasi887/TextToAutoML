@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -8,6 +9,7 @@ from sklearn.datasets import make_classification, make_regression
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from services.automl.pipeline import run_automl_pipeline
+from services.automl.training import train_models as baseline_train_models
 
 
 def _build_regression_dataset() -> pd.DataFrame:
@@ -130,3 +132,135 @@ def test_all_model_failure_returns_controlled_failure(monkeypatch):
     assert result["status"] == "failed"
     assert "All candidate models failed" in result["error"]
     assert result["models"]["trained"] == []
+
+
+def test_pipeline_passes_high_confidence_recommendation_to_supervised_training():
+    df = _build_binary_dataset()
+    recommendation = {
+        "status": "recommended",
+        "recommendations": [{"model_family": "RandomForestClassifier"}],
+    }
+
+    with patch(
+        "services.automl.pipeline.extract_meta_features",
+        return_value={"problem_type": "Binary Classification", "row_count": len(df)},
+    ), patch(
+        "services.automl.pipeline.recommend_models",
+        return_value=recommendation,
+    ), patch(
+        "services.automl.pipeline.train_models",
+        wraps=baseline_train_models,
+    ) as train_mock:
+        result = run_automl_pipeline(
+            df,
+            target_column="target",
+            problem_type="Binary Classification",
+        )
+
+    assert result["status"] == "success"
+    assert train_mock.call_args.kwargs["recommended_model_order"] == [
+        "RandomForestClassifier"
+    ]
+
+
+def test_pipeline_passes_cached_openml_records_to_recommender(monkeypatch):
+    df = _build_binary_dataset()
+    openml_records = [{
+        "source": "openml",
+        "dataset_id": "61",
+        "problem_type": "Binary Classification",
+        "best_model": "RandomForestClassifier",
+        "selection_metric": "f1_score",
+        "metric_value": 0.9,
+        "meta_features": {"problem_type": "Binary Classification"},
+    }]
+    recommendation = {
+        "status": "recommended",
+        "recommendations": [{"model_family": "RandomForestClassifier"}],
+    }
+
+    with patch(
+        "services.automl.pipeline.load_cached_openml_records",
+        return_value=openml_records,
+    ) as records_mock, patch(
+        "services.automl.pipeline.recommend_models",
+        return_value=recommendation,
+    ) as recommend_mock:
+        result = run_automl_pipeline(
+            df,
+            target_column="target",
+            problem_type="Binary Classification",
+        )
+
+    assert result["status"] == "success"
+    records_mock.assert_called_once_with()
+    assert recommend_mock.call_args.kwargs["openml_records"] == openml_records
+
+
+def test_pipeline_uses_local_recommendation_when_cached_openml_records_are_empty(monkeypatch):
+    df = _build_binary_dataset()
+    recommendation = {"status": "low_confidence", "recommendations": []}
+
+    with patch(
+        "services.automl.pipeline.load_cached_openml_records",
+        return_value=[],
+    ), patch(
+        "services.automl.pipeline.recommend_models",
+        return_value=recommendation,
+    ) as recommend_mock:
+        result = run_automl_pipeline(
+            df,
+            target_column="target",
+            problem_type="Binary Classification",
+        )
+
+    assert result["status"] == "success"
+    assert recommend_mock.call_args.kwargs["openml_records"] == []
+
+
+def test_pipeline_does_not_fetch_openml_during_training(monkeypatch):
+    df = _build_binary_dataset()
+
+    with patch(
+        "services.automl.pipeline.load_cached_openml_records",
+        return_value=[],
+    ), patch(
+        "services.metalearning.openml_loader.fetch_openml_task",
+        side_effect=AssertionError("network fetch must not run during training"),
+    ), patch(
+        "services.metalearning.openml_loader.fetch_openml_task_runs",
+        side_effect=AssertionError("network fetch must not run during training"),
+    ), patch(
+        "services.metalearning.openml_loader.fetch_openml_task_evaluations",
+        side_effect=AssertionError("network fetch must not run during training"),
+    ):
+        result = run_automl_pipeline(
+            df,
+            target_column="target",
+            problem_type="Binary Classification",
+        )
+
+    assert result["status"] == "success"
+
+
+def test_pipeline_uses_fixed_order_when_recommendation_is_low_confidence():
+    df = _build_binary_dataset()
+
+    with patch(
+        "services.automl.pipeline.extract_meta_features",
+        return_value={"problem_type": "Binary Classification"},
+    ), patch(
+        "services.automl.pipeline.recommend_models",
+        return_value={"status": "low_confidence", "recommendations": []},
+    ), patch(
+        "services.automl.pipeline.train_models",
+        wraps=baseline_train_models,
+    ) as train_mock:
+        result = run_automl_pipeline(
+            df,
+            target_column="target",
+            problem_type="Binary Classification",
+        )
+
+    assert result["status"] == "success"
+    assert train_mock.call_args.kwargs["recommended_model_order"] is None

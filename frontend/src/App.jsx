@@ -44,6 +44,11 @@ export default function App() {
   const [trainingState, setTrainingState] = useState("idle");
   const [trainingError, setTrainingError] = useState("");
   const [trainingResult, setTrainingResult] = useState(null);
+  const [predictionState, setPredictionState] = useState("idle");
+  const [predictionError, setPredictionError] = useState("");
+  const [predictionMode, setPredictionMode] = useState("sample");
+  const [predictionInputs, setPredictionInputs] = useState({});
+  const [predictionResult, setPredictionResult] = useState(null);
 
   async function handleFileChange(event) {
     const file = event.target.files?.[0];
@@ -55,6 +60,11 @@ export default function App() {
     setUploadState("loading");
     setUploadError("");
     setUploadResult(null);
+    setPredictionState("idle");
+    setPredictionError("");
+    setPredictionMode("sample");
+    setPredictionInputs({});
+    setPredictionResult(null);
 
     const formData = new FormData();
     formData.append("file", file);
@@ -101,6 +111,11 @@ export default function App() {
     setTrainingState("idle");
     setTrainingError("");
     setTrainingResult(null);
+    setPredictionState("idle");
+    setPredictionError("");
+    setPredictionMode("sample");
+    setPredictionInputs({});
+    setPredictionResult(null);
 
     try {
       const response = await fetch("/nlp/analyze", {
@@ -150,9 +165,109 @@ export default function App() {
       setTrainingResult(payload);
       setTrainingState("success");
       setTrainingConfirmed(true);
+      setPredictionState("idle");
+      setPredictionError("");
+      setPredictionMode("sample");
+      setPredictionResult(null);
+      const rawFeatureNames = payload.automl_training?.preprocessing?.raw_feature_names || [];
+      setPredictionInputs(
+        Object.fromEntries(rawFeatureNames.map((column) => [column, ""]))
+      );
     } catch (error) {
       setTrainingState("error");
       setTrainingError(error.message || "Training failed. Please try again.");
+    }
+  }
+
+  function getPredictionFeatures() {
+    return trainingResult?.automl_training?.preprocessing?.raw_feature_names || [];
+  }
+
+  function getFeatureType(column) {
+    return uploadResult?.analysis?.data_types?.[column] || "object";
+  }
+
+  function updatePredictionInput(column, value) {
+    setPredictionInputs((current) => ({ ...current, [column]: value }));
+  }
+
+  function buildPredictionRecord() {
+    const features = getPredictionFeatures();
+    const record = {};
+    const targetColumn = trainingResult?.automl_training?.target_column || "";
+
+    if (predictionMode === "sample") {
+      const sample = uploadResult?.sample_rows?.[0] || {};
+      for (const column of features) {
+        if (column !== targetColumn && Object.prototype.hasOwnProperty.call(sample, column)) {
+          record[column] = sample[column];
+        }
+      }
+      return record;
+    }
+
+    for (const column of features) {
+      const value = predictionInputs[column];
+      if (value === undefined || value === "") {
+        continue;
+      }
+
+      const dtype = String(getFeatureType(column)).toLowerCase();
+      if (dtype.includes("bool")) {
+        const normalized = String(value).trim().toLowerCase();
+        if (!["true", "false"].includes(normalized)) {
+          throw new Error(`'${column}' must be true or false.`);
+        }
+        record[column] = normalized === "true";
+      } else if (
+        dtype.includes("int") ||
+        dtype.includes("float") ||
+        dtype.includes("double") ||
+        dtype.includes("number")
+      ) {
+        const numericValue = Number(value);
+        if (!Number.isFinite(numericValue)) {
+          throw new Error(`'${column}' must be a valid number.`);
+        }
+        record[column] = numericValue;
+      } else {
+        record[column] = value;
+      }
+    }
+
+    return record;
+  }
+
+  async function handlePredict() {
+    const modelId = trainingResult?.automl_training?.model?.model_id || trainingResult?.report?.model_id;
+    if (!modelId) {
+      setPredictionState("error");
+      setPredictionError("No saved model ID was returned by training.");
+      return;
+    }
+
+    setPredictionState("loading");
+    setPredictionError("");
+    setPredictionResult(null);
+
+    try {
+      const record = buildPredictionRecord();
+      const response = await fetch("/predict/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model_id: modelId, data: [record] }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload.detail || "Prediction failed.");
+      }
+
+      setPredictionResult(payload);
+      setPredictionState("success");
+    } catch (error) {
+      setPredictionState("error");
+      setPredictionError(error.message || "Prediction failed. Please try again.");
     }
   }
 
@@ -666,6 +781,167 @@ export default function App() {
             )}
           </div>
         </section>
+
+        {trainingState === "success" && trainingResult && (
+          <section
+            aria-label="Prediction"
+            style={{ ...panelStyle, marginTop: "20px", padding: "28px" }}
+          >
+            <div style={{ marginBottom: "18px" }}>
+              <p
+                style={{
+                  margin: "0 0 8px",
+                  color: "#8a988e",
+                  fontFamily: "'Courier New', monospace",
+                  fontSize: "11px",
+                  letterSpacing: "0.1em",
+                  textTransform: "uppercase",
+                }}
+              >
+                Next step
+              </p>
+              <h2 style={{ margin: 0, fontSize: "22px", fontWeight: 500 }}>
+                Make a prediction
+              </h2>
+              <div style={{ display: "flex", gap: "8px", marginTop: "16px", flexWrap: "wrap" }}>
+                {[{ value: "sample", label: "Predict Sample" }, { value: "new", label: "New Customer" }].map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={() => {
+                      setPredictionMode(option.value);
+                      setPredictionState("idle");
+                      setPredictionError("");
+                      setPredictionResult(null);
+                    }}
+                    aria-pressed={predictionMode === option.value}
+                    style={{
+                      padding: "9px 14px",
+                      border: `1px solid ${predictionMode === option.value ? "#1e6041" : "#cbd8cf"}`,
+                      borderRadius: "6px",
+                      background: predictionMode === option.value ? "#e3f0e6" : "#ffffff",
+                      color: "#1e6041",
+                      cursor: "pointer",
+                      font: "600 13px Arial, sans-serif",
+                    }}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+              <p style={{ margin: "10px 0 0", color: "#66756b", font: "14px/1.5 Arial, sans-serif" }}>
+                {predictionMode === "sample"
+                  ? "Use the first row from the uploaded dataset."
+                  : "All fields are optional."}
+              </p>
+            </div>
+
+            {getPredictionFeatures().length > 0 ? (
+              <>
+                {predictionMode === "new" && (
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+                      gap: "14px 18px",
+                      paddingTop: "18px",
+                      borderTop: "1px solid #edf2ee",
+                    }}
+                  >
+                    {getPredictionFeatures().map((column) => {
+                      const dtype = String(getFeatureType(column)).toLowerCase();
+                      const inputType =
+                        dtype.includes("int") || dtype.includes("float") || dtype.includes("double") || dtype.includes("number")
+                          ? "number"
+                          : "text";
+                      return (
+                        <label key={column} style={{ font: "13px/1.4 Arial, sans-serif", color: "#526158" }}>
+                          <span style={{ display: "block", marginBottom: "6px", fontWeight: 600 }}>
+                            {column}
+                          </span>
+                          <input
+                            type={inputType}
+                            step={inputType === "number" ? "any" : undefined}
+                            value={predictionInputs[column] ?? ""}
+                            onChange={(event) => updatePredictionInput(column, event.target.value)}
+                            style={{
+                              width: "100%",
+                              boxSizing: "border-box",
+                              padding: "10px 11px",
+                              border: "1px solid #cbd8cf",
+                              borderRadius: "6px",
+                              background: "#fbfcfa",
+                              font: "14px Arial, sans-serif",
+                            }}
+                          />
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <div style={{ marginTop: "20px" }}>
+                  <button
+                    type="button"
+                    onClick={handlePredict}
+                    disabled={predictionState === "loading"}
+                    style={{
+                      padding: "11px 18px",
+                      border: 0,
+                      borderRadius: "6px",
+                      background: predictionState === "loading" ? "#7f9a89" : "#1e6041",
+                      color: "#ffffff",
+                      cursor: predictionState === "loading" ? "default" : "pointer",
+                      font: "600 14px Arial, sans-serif",
+                    }}
+                  >
+                    {predictionState === "loading" ? "Predicting..." : "Get prediction"}
+                  </button>
+                </div>
+
+                {predictionState === "error" && (
+                  <p style={{ margin: "12px 0 0", color: "#a13d35", font: "14px/1.5 Arial, sans-serif" }}>
+                    {predictionError}
+                  </p>
+                )}
+
+                {predictionState === "success" && predictionResult && (
+                  <div
+                    style={{
+                      marginTop: "20px",
+                      padding: "18px",
+                      border: "1px solid #cfe0d4",
+                      borderRadius: "8px",
+                      background: "#f8fbf8",
+                      font: "14px/1.5 Arial, sans-serif",
+                    }}
+                  >
+                    <span style={{ color: "#66756b", fontSize: "12px" }}>Prediction</span>
+                    <div style={{ marginTop: "4px", fontSize: "28px", fontWeight: 600, color: "#1e6041" }}>
+                      {String(predictionResult.prediction_labels?.[0] ?? predictionResult.predictions?.[0] ?? "-")}
+                    </div>
+                    {predictionResult.probabilities?.[0] && (
+                      <div style={{ marginTop: "10px", color: "#526158" }}>
+                        Probabilities: {predictionResult.probabilities[0].map((value, index) => (
+                          <span key={index} style={{ marginRight: "12px" }}>
+                            {predictionResult.probability_labels?.[index] || `Class ${index}`}: {(Number(value) * 100).toFixed(1)}%
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    <div style={{ marginTop: "10px", color: "#8a988e", fontSize: "12px" }}>
+                      {predictionResult.model_name || "Saved model"} · {predictionResult.model_id || ""}
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : (
+              <p style={{ marginTop: "18px", color: "#a13d35", font: "14px/1.5 Arial, sans-serif" }}>
+                The trained model did not return its required input feature metadata.
+              </p>
+            )}
+          </section>
+        )}
       </main>
     </div>
   );

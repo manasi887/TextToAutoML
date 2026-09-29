@@ -4,9 +4,11 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
 import pandas as pd
+from sklearn.base import clone
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.cluster import DBSCAN, KMeans
 from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.model_selection import KFold, ParameterGrid, StratifiedKFold
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
@@ -21,13 +23,16 @@ from sklearn.metrics import (
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
 
-def _build_model_specs(problem_type: str) -> List[Tuple[str, Any]]:
+def _build_model_specs(
+    problem_type: str,
+    recommended_model_order: List[str] | None = None,
+) -> List[Tuple[str, Any]]:
     """Create the baseline model suite for the detected problem type."""
 
     normalized_type = (problem_type or "").strip().lower()
 
     if "regression" in normalized_type:
-        return [
+        model_specs = [
             ("LinearRegression", LinearRegression()),
             ("DecisionTreeRegressor", DecisionTreeRegressor(random_state=42)),
             (
@@ -36,8 +41,8 @@ def _build_model_specs(problem_type: str) -> List[Tuple[str, Any]]:
             ),
         ]
 
-    if "classification" in normalized_type:
-        return [
+    elif "classification" in normalized_type:
+        model_specs = [
             ("LogisticRegression", LogisticRegression(max_iter=500, random_state=42)),
             ("DecisionTreeClassifier", DecisionTreeClassifier(random_state=42)),
             (
@@ -46,13 +51,28 @@ def _build_model_specs(problem_type: str) -> List[Tuple[str, Any]]:
             ),
         ]
 
-    raise ValueError(f"Unsupported problem type for training: {problem_type}")
+    else:
+        raise ValueError(f"Unsupported problem type for training: {problem_type}")
+
+    if not recommended_model_order:
+        return model_specs
+
+    specs_by_name = dict(model_specs)
+    ordered_names: list[str] = []
+    for model_name in recommended_model_order:
+        if model_name in specs_by_name and model_name not in ordered_names:
+            ordered_names.append(model_name)
+    ordered_names.extend(
+        model_name for model_name, _ in model_specs if model_name not in ordered_names
+    )
+    return [(model_name, specs_by_name[model_name]) for model_name in ordered_names]
 
 
 def train_models(
     X_train: pd.DataFrame,
     y_train: pd.Series,
     problem_type: str,
+    recommended_model_order: List[str] | None = None,
 ) -> Dict[str, object]:
     """
     Train a baseline model suite for the detected task and continue on failures.
@@ -66,7 +86,7 @@ def train_models(
     training_errors: List[Dict[str, Any]] = []
 
     try:
-        model_specs = _build_model_specs(problem_type)
+        model_specs = _build_model_specs(problem_type, recommended_model_order)
     except ValueError as exc:
         return {
             "trained_models": {},
@@ -194,6 +214,168 @@ def evaluate_models(
         "results": results,
         "status": status,
         "errors": errors,
+    }
+
+
+def _safe_cv_folds(y: pd.Series, problem_type: str) -> int | None:
+    """Return a safe fold count for supervised CV without crashing on tiny datasets."""
+    normalized_type = (problem_type or "").strip().lower()
+
+    if "classification" in normalized_type:
+        value_counts = y.dropna().value_counts()
+        if value_counts.empty:
+            return None
+        min_class_count = int(value_counts.min())
+        if min_class_count < 2:
+            return None
+        return min(5, min_class_count)
+
+    if "regression" in normalized_type:
+        if len(y) < 2:
+            return None
+        return min(5, len(y))
+
+    return None
+
+
+def evaluate_models_cv(
+    models: Dict[str, Any],
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    problem_type: str,
+) -> Dict[str, object]:
+    """Cross-validate models on the training split only using task-specific metrics."""
+    normalized_type = (problem_type or "").strip().lower()
+    if "clustering" in normalized_type:
+        return {
+            "results": [],
+            "status": "Skipped",
+            "errors": [{"model_name": None, "error": "Clustering CV is intentionally not enabled."}],
+        }
+
+    results: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+
+    for model_name, model in models.items():
+        try:
+            n_splits = _safe_cv_folds(y_train, problem_type)
+            if n_splits is None:
+                errors.append({
+                    "model_name": model_name,
+                    "error": "Dataset is too small for 5-fold supervised CV; skipping CV scoring.",
+                })
+                continue
+
+            if "classification" in normalized_type:
+                cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+                fold_scores = []
+                for train_idx, valid_idx in cv.split(X_train, y_train):
+                    fold_model = clone(model)
+                    fold_model.fit(X_train.iloc[train_idx], y_train.iloc[train_idx])
+                    y_pred = fold_model.predict(X_train.iloc[valid_idx])
+                    fold_scores.append(
+                        float(
+                            f1_score(
+                                y_train.iloc[valid_idx],
+                                y_pred,
+                                average="weighted",
+                                zero_division=0,
+                            )
+                        )
+                    )
+                metrics = {"f1_score": float(np.mean(fold_scores))}
+            elif "regression" in normalized_type:
+                cv = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+                fold_scores = []
+                for train_idx, valid_idx in cv.split(X_train):
+                    fold_model = clone(model)
+                    fold_model.fit(X_train.iloc[train_idx], y_train.iloc[train_idx])
+                    y_pred = fold_model.predict(X_train.iloc[valid_idx])
+                    fold_scores.append(
+                        float(root_mean_squared_error(y_train.iloc[valid_idx], y_pred))
+                    )
+                metrics = {"rmse": float(np.mean(fold_scores))}
+            else:
+                raise ValueError(f"Unsupported problem type for CV evaluation: {problem_type}")
+
+            results.append({
+                "model_name": model_name,
+                "model": model,
+                "metrics": metrics,
+                "status": "CV Evaluated",
+            })
+        except Exception as exc:  # pragma: no cover - defensive failure recording
+            errors.append({"model_name": model_name, "error": str(exc)})
+
+    return {
+        "results": results,
+        "status": "Completed" if results else "Failed",
+        "errors": errors,
+    }
+
+
+def tune_selected_model(
+    model_name: str,
+    model: Any,
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    problem_type: str,
+) -> Dict[str, object]:
+    """Run a small CV-only search for the selected supervised model family."""
+    normalized_type = (problem_type or "").strip().lower()
+    if "clustering" in normalized_type:
+        return {"model": model, "status": "Skipped", "errors": []}
+
+    search_spaces = {
+        "LogisticRegression": {"C": [0.1, 1.0]},
+        "DecisionTreeClassifier": {"max_depth": [None, 5]},
+        "RandomForestClassifier": {"n_estimators": [100, 200]},
+        "LinearRegression": {"fit_intercept": [True, False]},
+        "DecisionTreeRegressor": {"max_depth": [None, 5]},
+        "RandomForestRegressor": {"n_estimators": [100, 200]},
+    }
+    parameter_grid = search_spaces.get(model_name)
+    if parameter_grid is None or (
+        "classification" not in normalized_type
+        and "regression" not in normalized_type
+    ):
+        return {"model": model, "status": "Skipped", "errors": []}
+
+    candidates = []
+    errors: List[Dict[str, Any]] = []
+    try:
+        for parameters in ParameterGrid(parameter_grid):
+            candidate = clone(model)
+            candidate.set_params(**parameters)
+            evaluation = evaluate_models_cv(
+                {model_name: candidate}, X_train, y_train, problem_type
+            )
+            results = evaluation.get("results", [])
+            if results:
+                candidates.append((results[0]["metrics"], candidate, parameters))
+            else:
+                errors.extend(evaluation.get("errors", []))
+    except Exception as exc:  # pragma: no cover - defensive HPO fallback
+        errors.append({"model_name": model_name, "error": str(exc)})
+
+    if not candidates:
+        return {"model": model, "status": "Fallback", "errors": errors}
+
+    if "classification" in normalized_type:
+        best_metrics, best_model, best_parameters = max(
+            candidates, key=lambda item: item[0]["f1_score"]
+        )
+    else:
+        best_metrics, best_model, best_parameters = min(
+            candidates, key=lambda item: item[0]["rmse"]
+        )
+
+    return {
+        "model": best_model,
+        "status": "Completed",
+        "errors": errors,
+        "parameters": best_parameters,
+        "metrics": best_metrics,
     }
 
 

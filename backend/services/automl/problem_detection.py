@@ -289,6 +289,8 @@ def recommend_models(problem_type: str) -> Dict[str, object]:
 
 
 def _infer_candidate_datatype(series: pd.Series) -> str | None:
+    if pd.api.types.is_bool_dtype(series):
+        return "categorical"
     if pd.api.types.is_numeric_dtype(series):
         return "numeric"
     if _is_categorical_target_series(series):

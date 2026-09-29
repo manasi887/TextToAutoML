@@ -75,6 +75,9 @@ def test_repeated_training_runs_are_preserved_and_compared(tmp_path, monkeypatch
 
     history = json.loads(history_path.read_text(encoding="utf-8"))
     assert [item["run_id"] for item in history] == ["run_one", "run_two"]
+    assert history[0]["meta_features"]["target_exists"] is True
+    assert history[0]["meta_features"]["target_problem_type"] == "Binary Classification"
+    assert history[1]["meta_features"]["feature_count"] == 1
 
     report = generate_training_report(
         second["nlp_resolution"], second["automl_training"]
@@ -82,3 +85,46 @@ def test_repeated_training_runs_are_preserved_and_compared(tmp_path, monkeypatch
     assert report["run"]["run_id"] == "run_two"
     assert report["comparison"]["status"] == "improved"
     json.dumps(report)
+
+
+def test_legacy_history_records_without_meta_features_remain_compatible(tmp_path):
+    history_path = tmp_path / "training_history.json"
+    legacy_record = {
+        "run_id": "legacy_run",
+        "timestamp": "2026-01-01T00:00:00Z",
+        "dataset": "legacy.csv",
+        "target": "target",
+        "problem_type": "Regression",
+        "best_model": "LinearRegression",
+        "selection_metric": "rmse",
+        "metric_value": 1.5,
+        "training_time_seconds": 0.2,
+    }
+    history_path.write_text(json.dumps([legacy_record]) + "\n", encoding="utf-8")
+
+    dataframe = pd.DataFrame({"target": [1.0, 2.0, 3.0], "feature": [2.0, 4.0, 6.0]})
+    training_output = {
+        "model": {"model_id": "new_run"},
+        "target_column": "target",
+        "problem_type": "Regression",
+        "best_model": {
+            "name": "LinearRegression",
+            "selection_metric": "rmse",
+            "metrics": {"rmse": 0.5},
+        },
+        "training_time_seconds": 0.3,
+    }
+
+    record, comparison = run_history.record_training_run(
+        dataframe,
+        training_output,
+        dataset_name="legacy.csv",
+        history_path=history_path,
+    )
+
+    history = json.loads(history_path.read_text(encoding="utf-8"))
+    assert history[0] == legacy_record
+    assert "meta_features" not in history[0]
+    assert record["meta_features"]["target_problem_type"] == "Regression"
+    assert comparison["status"] == "improved"
+    json.dumps(history, allow_nan=False)

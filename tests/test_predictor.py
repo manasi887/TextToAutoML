@@ -103,8 +103,11 @@ def _make_model_package(package_store_dir, *, model_name="BinaryModel", kind="bi
 
 def test_predict_with_model_binary_classification(package_store_dir):
     package = _make_model_package(package_store_dir)
+    package["preprocessing"]["target_classes"] = [0, 1]
     result = predict_with_model(package, [{"Age": 30, "Balance": 1000, "country": "France", "gender": "Female"}])
     assert result["predictions"] == [1]
+    assert result["prediction_labels"] == ["Exited"]
+    assert result["probability_labels"] == ["Not Exited", "Exited"]
     assert result["prediction_count"] == 1
 
 
@@ -116,8 +119,14 @@ def test_predict_with_model_regression(package_store_dir):
 
 def test_predict_with_model_missing_required_feature(package_store_dir):
     package = _make_model_package(package_store_dir)
-    with pytest.raises(ValueError, match="Missing required feature"):
-        predict_with_model(package, [{"Age": 30, "Balance": 1000}])
+    result = predict_with_model(package, [{"Age": 30, "Balance": 1000}])
+    assert result["predictions"] in ([0], [1])
+
+
+def test_predict_with_model_optional_empty_record_uses_saved_imputation(package_store_dir):
+    package = _make_model_package(package_store_dir)
+    result = predict_with_model(package, [{}])
+    assert result["predictions"] in ([0], [1])
 
 
 def test_predict_with_model_unknown_categorical_value(package_store_dir):

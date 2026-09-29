@@ -128,6 +128,16 @@ def test_predict_api_returns_classification_success_response(persisted_model):
     assert len(body["predictions"]) == 2
 
 
+def test_predict_api_allows_optional_features(persisted_model):
+    client = TestClient(app)
+    response = client.post(
+        "/predict/",
+        json={"model_id": persisted_model["model_id"], "data": [{}]},
+    )
+    assert response.status_code == 200
+    assert response.json()["prediction_count"] == 1
+
+
 def test_predict_api_returns_regression_success_response(tmp_path, monkeypatch):
     monkeypatch.setattr(persistence, "DEFAULT_STORAGE_DIR", tmp_path / "models")
     (tmp_path / "models").mkdir(parents=True, exist_ok=True)

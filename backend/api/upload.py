@@ -71,6 +71,7 @@ async def upload_dataset(file: UploadFile = File(...)):
         "saved_to": str(file_path),
         "validation": validation,
         "analysis": analysis,
+        "sample_rows": df.head(1).to_dict(orient="records"),
         "preprocessing": preprocessing,
         "dataset_intelligence": dataset_intelligence,
         "automl_recommendation": automl_recommendation,

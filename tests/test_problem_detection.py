@@ -114,6 +114,24 @@ def test_detect_problem_type_returns_binary_classification_for_binary_categorica
     assert "two classes" in report["reason"].lower()
 
 
+def test_boolean_target_candidate_is_reported_as_binary_classification():
+    dataframe = pd.DataFrame(
+        {
+            "target_flag": [True, False, True, False],
+            "feature": [1.2, 2.4, 3.1, 4.8],
+        }
+    )
+
+    candidate = next(
+        item
+        for item in detect_target_candidates(dataframe)["target_candidates"]
+        if item["column"] == "target_flag"
+    )
+
+    assert candidate["datatype"] == "categorical"
+    assert candidate["inferred_problem_type"] == "Binary Classification"
+
+
 def test_detect_identifier_columns_ignores_measurements_and_postal_codes():
     df = pd.DataFrame(
         {

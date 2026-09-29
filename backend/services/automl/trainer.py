@@ -94,6 +94,7 @@ def prepare_training_data(df: pd.DataFrame, target_column: str) -> Dict[str, obj
 
       # Capture target metadata before any transformation
       target_dtype = str(y.dtype)
+      target_classes = [value.item() if isinstance(value, np.generic) else value for value in pd.unique(y.dropna())]
       target_encoded = False
       target_encoder = None
 
@@ -121,19 +122,17 @@ def prepare_training_data(df: pd.DataFrame, target_column: str) -> Dict[str, obj
       numeric_columns = X.select_dtypes(include=["number"]).columns.tolist()
       numeric_imputation_values: Dict[str, float] = {}
       for col in numeric_columns:
-          if X[col].isna().any():
-              fill_value = float(X[col].mean())
-              X[col] = X[col].fillna(fill_value)
-              numeric_imputation_values[col] = fill_value
+          fill_value = float(X[col].mean())
+          X[col] = X[col].fillna(fill_value)
+          numeric_imputation_values[col] = fill_value
 
       categorical_columns = X.select_dtypes(include=["object", "string", "category"]).columns.tolist()
       categorical_imputation_values: Dict[str, Any] = {}
       for col in categorical_columns:
-          if X[col].isna().any():
-              mode_vals = X[col].mode(dropna=True)
-              fill_value = mode_vals.iloc[0] if not mode_vals.empty else "<missing>"
-              X[col] = X[col].fillna(fill_value)
-              categorical_imputation_values[col] = fill_value
+          mode_vals = X[col].mode(dropna=True)
+          fill_value = mode_vals.iloc[0] if not mode_vals.empty else "<missing>"
+          X[col] = X[col].fillna(fill_value)
+          categorical_imputation_values[col] = fill_value
 
       raw_feature_names = X.columns.tolist()
 
@@ -156,6 +155,7 @@ def prepare_training_data(df: pd.DataFrame, target_column: str) -> Dict[str, obj
 
           target_encoded = True
           target_encoder = label_encoder
+          target_classes = [str(value) for value in label_encoder.classes_]
 
       preprocessing_metadata = {
           "removed_columns": removed_columns,
@@ -172,6 +172,7 @@ def prepare_training_data(df: pd.DataFrame, target_column: str) -> Dict[str, obj
           "target_dtype": target_dtype,
           "target_encoded": target_encoded,
           "target_encoder": target_encoder,
+          "target_classes": target_classes,
       }
 
       return {

@@ -10,6 +10,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from services.nlp.dataset_resolution import resolve_dataset_context
+from services.nlp.target_extraction import extract_target_reference
 
 
 class DatasetResolutionTests(unittest.TestCase):
@@ -168,6 +169,12 @@ class DatasetResolutionTests(unittest.TestCase):
                     "confidence": 0.51,
                     "inferred_problem_type": "Regression",
                 },
+                {
+                    "column": "ActiveMember",
+                    "score": 3.5,
+                    "confidence": 0.79,
+                    "inferred_problem_type": "Binary Classification",
+                },
             ],
             "requires_user_confirmation": False,
         }
@@ -207,11 +214,21 @@ class DatasetResolutionTests(unittest.TestCase):
                     "confidence": 0.51,
                     "inferred_problem_type": "Regression",
                 },
+                {
+                    "column": "ActiveMember",
+                    "score": 3.5,
+                    "confidence": 0.79,
+                    "inferred_problem_type": "Binary Classification",
+                },
             ],
             "requires_user_confirmation": False,
         }
         dataframe = pd.DataFrame(
-            {"Exited": [0, 1, 0], "feature": [1, 2, 3]}
+            {
+                "Exited": [0, 1, 0],
+                "ActiveMember": [1, 1, 0],
+                "feature": [1, 2, 3],
+            }
         )
         with patch(
             "services.nlp.dataset_resolution.detect_target_candidates",
@@ -407,6 +424,75 @@ class DatasetResolutionTests(unittest.TestCase):
         self.assertIsNone(result["target_column"])
         self.assertEqual(result["problem_type"], "Regression")
         self.assertTrue(result["needs_clarification"])
+
+    def test_semantic_target_reranking_uses_only_compatible_candidates(self) -> None:
+        dataframe = pd.DataFrame(
+            {
+                "exit": [True, False] * 10,
+                "active_member": [True, True, False, False] * 5,
+                "risk_score": [index / 20 for index in range(20)],
+                "risk_segment": ["high", "low"] * 10,
+                "gender": ["F", "M"] * 10,
+            }
+        )
+        target = extract_target_reference(
+            "Predict whether a customer will leave the bank."
+        )
+        nlp_result = {
+            "intent": {"intent": "classification"},
+            "intent_analysis": {"needs_clarification": False},
+            "task": {"problem_type": "classification"},
+            "target": {
+                "target_reference": target["target_reference"],
+                "matched_column": None,
+                "confidence": 0.0,
+                "needs_clarification": True,
+            },
+        }
+
+        result = resolve_dataset_context(nlp_result, dataframe)
+
+        self.assertEqual(result["target_column"], "exit")
+        self.assertEqual(result["problem_type"], "Binary Classification")
+        self.assertFalse(result["needs_clarification"])
+        self.assertGreaterEqual(result["target_match_score"], 0.92)
+        self.assertGreaterEqual(result["target_match_margin"], 0.01)
+
+    def test_explicit_near_tied_semantic_target_still_requires_clarification(self) -> None:
+        dataframe = pd.DataFrame(
+            {
+                "exit": [True, False, True, False],
+                "exits": [False, True, True, False],
+            }
+        )
+        nlp_result = {
+            "intent": {"intent": "classification"},
+            "intent_analysis": {"needs_clarification": False},
+            "task": {"problem_type": "classification"},
+            "target": {
+                "target_reference": "whether a customer will leave",
+                "matched_column": None,
+                "confidence": 0.0,
+                "needs_clarification": True,
+            },
+        }
+        target_report = {
+            "target_candidates": [
+                {"column": "exit", "score": 8.0, "confidence": 0.9},
+                {"column": "exits", "score": 7.8, "confidence": 0.9},
+            ],
+            "requires_user_confirmation": True,
+        }
+
+        with patch(
+            "services.nlp.dataset_resolution.detect_target_candidates",
+            return_value=target_report,
+        ):
+            result = resolve_dataset_context(nlp_result, dataframe)
+
+        self.assertIsNone(result["target_column"])
+        self.assertTrue(result["needs_clarification"])
+        self.assertIn("does not clearly match", result["reason"])
 
 
 if __name__ == "__main__":
