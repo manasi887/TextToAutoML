@@ -184,7 +184,9 @@ def prepare_training_data(df: pd.DataFrame, target_column: str) -> Dict[str, obj
       }
 
 
-def prepare_clustering_data(df: pd.DataFrame) -> Dict[str, object]:
+def prepare_clustering_data(
+    df: pd.DataFrame, excluded_target_columns: List[str] | None = None
+) -> Dict[str, object]:
       """Prepare feature data for unsupervised clustering without a target column."""
       if not isinstance(df, pd.DataFrame):
           raise TypeError("df must be a pandas DataFrame")
@@ -196,7 +198,16 @@ def prepare_clustering_data(df: pd.DataFrame) -> Dict[str, object]:
 
       identifier_cols = detect_identifier_columns(working_df).get("identifier_columns", [])
       constant_cols = detect_constant_columns(working_df).get("constant_columns", [])
-      columns_to_drop = [column for column in identifier_cols + constant_cols if column in working_df.columns]
+      excluded_target_columns = [
+          column
+          for column in excluded_target_columns or []
+          if column in working_df.columns
+      ]
+      columns_to_drop = list(dict.fromkeys(
+          column
+          for column in identifier_cols + constant_cols + excluded_target_columns
+          if column in working_df.columns
+      ))
       X = working_df.drop(columns=columns_to_drop, errors="ignore")
 
       numeric_columns = X.select_dtypes(include=["number"]).columns.tolist()
@@ -225,6 +236,7 @@ def prepare_clustering_data(df: pd.DataFrame) -> Dict[str, object]:
               "removed_columns": {
                   "identifier_columns": identifier_cols,
                   "constant_columns": constant_cols,
+                  "target_columns": excluded_target_columns,
               },
               "imputed_columns": {
                   "numeric": numeric_columns,
@@ -236,6 +248,7 @@ def prepare_clustering_data(df: pd.DataFrame) -> Dict[str, object]:
                   "categorical": categorical_imputation_values,
               },
               "target_column": None,
+              "excluded_target_columns": excluded_target_columns,
               "target_encoded": False,
           },
       }

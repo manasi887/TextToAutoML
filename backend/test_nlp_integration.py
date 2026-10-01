@@ -60,7 +60,10 @@ class NlpIntegrationTests(unittest.TestCase):
             result = integrate_nlp_with_automl(self.dataframe, nlp_result)
 
         run_mock.assert_called_once_with(
-            self.dataframe, "Exited", "Binary Classification"
+            self.dataframe,
+            "Exited",
+            "Binary Classification",
+            excluded_target_columns=[],
         )
         self.assertEqual(result["automl_training"]["status"], "Completed")
         self.assertEqual(result["automl_training"]["score"], 0.91)

@@ -90,6 +90,7 @@ def run_automl_pipeline(
     problem_type: str | None = None,
     test_size: float = 0.2,
     random_state: int = 42,
+    excluded_target_columns: List[str] | None = None,
 ) -> Dict[str, object]:
     """Run the end-to-end AutoML training workflow for a validated supervised task."""
 
@@ -105,7 +106,9 @@ def run_automl_pipeline(
     normalized_problem_type = "Clustering" if str(problem_type or "").strip().lower() == "clustering" else _normalize_problem_type(problem_type, df, target_column)
 
     if normalized_problem_type == "Clustering":
-        preparation = prepare_clustering_data(df)
+        preparation = prepare_clustering_data(
+            df, excluded_target_columns=excluded_target_columns
+        )
         X = preparation["X"]
         feature_names = preparation["feature_names"]
         encoders = preparation["encoders"]
@@ -122,13 +125,22 @@ def run_automl_pipeline(
         best_model = best_model_report["best_model"]
         best_name = best_model_report["best_model_name"]
         metrics = best_model_report["best_metrics"]
+        excluded_targets = preparation["preprocessing"].get(
+            "excluded_target_columns", []
+        )
+        preprocessing_target = excluded_targets[0] if excluded_targets else None
         packaged_model = save_model_package(
             model=best_model,
             encoders=encoders,
             feature_names=feature_names,
             target_column="",
             problem_type=normalized_problem_type,
-            preprocessing={**preparation["preprocessing"], "feature_names": feature_names, "encoders": encoders},
+            preprocessing={
+                **preparation["preprocessing"],
+                "target_column": preprocessing_target,
+                "feature_names": feature_names,
+                "encoders": encoders,
+            },
             model_name=best_name,
             selection_metric="silhouette_score",
             metrics=metrics,
@@ -138,7 +150,12 @@ def run_automl_pipeline(
             "target_column": None,
             "problem_type": normalized_problem_type,
             "data": {"original_rows": int(len(df)), "original_columns": int(len(df.columns)), "training_rows": int(len(X)), "test_rows": 0, "feature_count": int(X.shape[1])},
-            "preprocessing": {**preparation["preprocessing"], "feature_names": feature_names, "encoders": encoders},
+            "preprocessing": {
+                **preparation["preprocessing"],
+                "target_column": preprocessing_target,
+                "feature_names": feature_names,
+                "encoders": encoders,
+            },
             "models": {"trained": list(trained_models), "failed": training_errors},
             "evaluation": {"status": evaluation.get("status", "Completed"), "results": evaluation_results, "errors": evaluation.get("errors", [])},
             "best_model": {"name": best_name, "selection_metric": "silhouette_score", "metrics": metrics, "reason": best_model_report["selection_reason"]},

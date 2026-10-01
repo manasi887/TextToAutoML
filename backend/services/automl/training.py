@@ -19,6 +19,7 @@ from sklearn.metrics import (
     r2_score,
     recall_score,
     root_mean_squared_error,
+    silhouette_score,
 )
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
@@ -116,20 +117,60 @@ def train_models(
     }
 
 
+def _clustering_score_sample(X: pd.DataFrame, max_rows: int = 5000) -> pd.DataFrame:
+    """Return a deterministic sample for silhouette scoring on large datasets."""
+    if len(X) <= max_rows:
+        return X.copy()
+    return X.sample(n=max_rows, random_state=42).copy()
+
+
 def train_clustering_models(X_train: pd.DataFrame) -> Dict[str, object]:
-    """Train deterministic clustering candidates on the prepared feature matrix."""
-    models: Dict[str, Any] = {
-        "KMeans": make_pipeline(StandardScaler(), KMeans(n_clusters=3, random_state=42, n_init=10)),
-        "DBSCAN": make_pipeline(StandardScaler(), DBSCAN(eps=0.9, min_samples=3)),
-    }
+    """Train deterministic KMeans candidates on the prepared feature matrix."""
+    if X_train is None or X_train.empty:
+        return {
+            "trained_models": {},
+            "model_names": [],
+            "status": "Failed",
+            "training_errors": [{"model_name": None, "error": "Clustering input is empty."}],
+        }
+
+    n_samples = len(X_train)
+    if n_samples < 2:
+        return {
+            "trained_models": {},
+            "model_names": [],
+            "status": "Failed",
+            "training_errors": [{"model_name": None, "error": "Clustering requires at least two rows."}],
+        }
+
+    max_k = min(10, n_samples - 1)
+    candidate_ks = list(range(2, max_k + 1))
+    if not candidate_ks:
+        return {
+            "trained_models": {},
+            "model_names": [],
+            "status": "Failed",
+            "training_errors": [{"model_name": None, "error": "No valid KMeans cluster counts are available."}],
+        }
+
     trained_models: Dict[str, Any] = {}
     training_errors: List[Dict[str, Any]] = []
-    for model_name, model in models.items():
+
+    for k in candidate_ks:
+        model_name = f"KMeans_k{k}"
         try:
+            model = make_pipeline(StandardScaler(), KMeans(n_clusters=k, random_state=42, n_init=10))
             model.fit(X_train)
+
+            labels = model.predict(X_train)
+            unique_labels = np.unique(labels)
+            if unique_labels.size < 2 or unique_labels.size >= n_samples:
+                raise ValueError(f"KMeans(k={k}) produced an invalid silhouette configuration.")
+
             trained_models[model_name] = model
         except Exception as exc:  # pragma: no cover - defensive failure recording
             training_errors.append({"model_name": model_name, "error": str(exc)})
+
     return {
         "trained_models": trained_models,
         "model_names": list(trained_models),
@@ -162,26 +203,31 @@ def evaluate_models(
     results: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
     normalized_type = (problem_type or "").strip().lower()
+    clustering_score_sample = (
+        _clustering_score_sample(X_test) if "clustering" in normalized_type else None
+    )
 
     for model_name, model in models.items():
         try:
-            predictions = model.predict(X_test)
-
             if "clustering" in normalized_type:
-                from sklearn.metrics import silhouette_score
-
-                labels = np.asarray(predictions)
+                assert clustering_score_sample is not None
+                labels = np.asarray(model.predict(clustering_score_sample))
                 unique_labels = set(labels.tolist())
-                if len(unique_labels) < 2 or len(unique_labels) >= len(X_test):
+                if len(unique_labels) < 2 or len(unique_labels) >= len(clustering_score_sample):
                     raise ValueError("Clustering evaluation requires at least two non-trivial clusters.")
-                metrics = {"silhouette_score": float(silhouette_score(X_test, labels))}
+                score = float(silhouette_score(clustering_score_sample, labels))
+                if not np.isfinite(score):
+                    raise ValueError("Clustering evaluation produced a non-finite silhouette score.")
+                metrics = {"silhouette_score": score}
             elif "regression" in normalized_type:
+                predictions = model.predict(X_test)
                 metrics = {
                     "mae": float(mean_absolute_error(y_test, predictions)),
                     "rmse": float(root_mean_squared_error(y_test, predictions)),
                     "r2": float(r2_score(y_test, predictions)),
                 }
             elif "classification" in normalized_type:
+                predictions = model.predict(X_test)
                 y_true = np.asarray(y_test)
                 y_pred = np.asarray(predictions)
                 metrics = {

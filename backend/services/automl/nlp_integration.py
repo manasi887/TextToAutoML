@@ -63,8 +63,29 @@ def integrate_nlp_with_automl(
     if problem_type.strip().lower() != "clustering" and (not isinstance(target_column, str) or not target_column.strip()):
         raise ValueError("A resolved target_column is required for AutoML training")
 
+    excluded_target_columns: list[str] = []
+    if problem_type.strip().lower() == "clustering":
+        if isinstance(target_column, str) and target_column in df.columns:
+            excluded_target_columns = [target_column]
+        else:
+            candidates = resolution.get("candidates", [])
+            if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict):
+                candidate = candidates[0]
+                column = candidate.get("column")
+                try:
+                    confidence = float(candidate.get("confidence", 0.0))
+                except (TypeError, ValueError):
+                    confidence = 0.0
+                if isinstance(column, str) and column in df.columns and confidence >= 0.7:
+                    excluded_target_columns = [column]
+
     training_started_at = time.perf_counter()
-    training_output = run_automl_pipeline(df, target_column, problem_type)
+    training_output = run_automl_pipeline(
+        df,
+        target_column,
+        problem_type,
+        excluded_target_columns=excluded_target_columns,
+    )
     training_time_seconds = round(time.perf_counter() - training_started_at, 6)
     training_output = {
         **training_output,
