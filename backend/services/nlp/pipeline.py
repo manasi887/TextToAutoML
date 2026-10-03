@@ -9,7 +9,7 @@ from .dataset_resolution import resolve_dataset_context
 from .intent_detection import detect_user_intent
 from .target_extraction import extract_target_reference
 from .target_matching import match_target_column
-from .task_mapping import map_intent_to_task
+from .task_mapping import detect_explicit_task_intent, map_intent_to_task
 from services.automl.time_estimator import estimate_training_time
 
 
@@ -18,7 +18,31 @@ def process_nlp_request(user_text: str, df: pd.DataFrame) -> dict[str, Any]:
     intent_result = detect_user_intent(user_text)
     intent_analysis = analyze_intent_confidence(intent_result)
     intent = intent_result["intent"]
-    task_result = map_intent_to_task(intent)
+    explicit_task_intent = detect_explicit_task_intent(user_text)
+    classifier_needs_clarification = intent_analysis["needs_clarification"]
+    if explicit_task_intent == "conflict":
+        intent_analysis = {
+            **intent_analysis,
+            "classifier_needs_clarification": classifier_needs_clarification,
+            "needs_clarification": True,
+            "clarification_reason": (
+                "The request explicitly contains conflicting classification and regression instructions."
+            ),
+        }
+        task_intent = intent
+    elif explicit_task_intent is not None:
+        intent_analysis = {
+            **intent_analysis,
+            "classifier_needs_clarification": classifier_needs_clarification,
+            "needs_clarification": False,
+            "clarification_reason": (
+                "The explicit task statement takes precedence over classifier confidence."
+            ),
+        }
+        task_intent = explicit_task_intent
+    else:
+        task_intent = intent
+    task_result = map_intent_to_task(task_intent)
     target_extraction = extract_target_reference(user_text)
 
     target_result: dict[str, Any] = {
@@ -30,7 +54,15 @@ def process_nlp_request(user_text: str, df: pd.DataFrame) -> dict[str, Any]:
         "needs_clarification": target_extraction["needs_clarification"],
     }
     if target_extraction["target_found"]:
-        target_result = match_target_column(target_extraction["target_reference"], df)
+        if target_extraction.get("explicit_target_column"):
+            target_result = match_target_column(
+                target_extraction["target_reference"],
+                df,
+                require_exact_match=True,
+            )
+            target_result["explicit_target_column"] = True
+        else:
+            target_result = match_target_column(target_extraction["target_reference"], df)
         target_result["target_found"] = target_result["matched_column"] is not None
 
     supervised_target_required = task_result["problem_type"] in {
@@ -54,6 +86,7 @@ def process_nlp_request(user_text: str, df: pd.DataFrame) -> dict[str, Any]:
     dataset_resolution = resolve_dataset_context(
         {
             "intent": intent_result,
+            "intent_analysis": intent_analysis,
             "task": {
                 "problem_type": task_result["problem_type"],
                 "clarification_required": task_result["clarification_required"],

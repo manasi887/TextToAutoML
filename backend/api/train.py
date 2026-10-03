@@ -20,6 +20,7 @@ router = APIRouter(
 class TrainRequest(BaseModel):
     filename: str = Field(..., min_length=1)
     target_column: str = Field(..., min_length=1)
+    group_column: str | None = None
     problem_type: str | None = None
     test_size: float = Field(0.2, gt=0.0, lt=1.0)
     random_state: int = 42
@@ -33,6 +34,12 @@ class TrainRequest(BaseModel):
         if Path(cleaned).name != cleaned:
             raise ValueError("Only the uploaded filename itself may be used; directory traversal is not allowed.")
         return cleaned
+
+    @field_validator("group_column")
+    @classmethod
+    def normalize_group_column(cls, value: str | None) -> str | None:
+        cleaned = value.strip() if value is not None else None
+        return cleaned or None
 
 
 def _safe_upload_path(filename: str) -> Path:
@@ -184,6 +191,7 @@ async def train_dataset(request: TrainRequest):
         pipeline_result = run_automl_pipeline(
             df,
             target_column=target_column,
+            group_column=request.group_column,
             problem_type=problem_type,
             test_size=request.test_size,
             random_state=request.random_state,

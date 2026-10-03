@@ -219,6 +219,21 @@ def test_single_word_semantic_guess_requires_clarification_but_income_token_matc
     assert unrelated_result["needs_clarification"] is True
 
 
+def test_explicit_median_house_value_matches_its_existing_dataframe_column():
+    dataframe = pd.DataFrame(
+        {
+            "median_income": [3.1, 2.8, 4.2, 3.0],
+            "housing_median_age": [20, 30, 40, 50],
+            "median_house_value": [220000, 250000, 300000, 180000],
+        }
+    )
+
+    result = match_target_column("median_house_value", dataframe)
+
+    assert result["matched_column"] == "median_house_value"
+    assert result["needs_clarification"] is False
+
+
 def test_generic_column_matches_only_when_reference_contains_exact_name():
     dataframe = pd.DataFrame({"col_1": [1, 2], "col_2": [3, 4], "col_3": [5, 6]})
 

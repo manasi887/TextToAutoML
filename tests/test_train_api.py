@@ -83,6 +83,32 @@ def test_valid_regression_training_request(upload_dir):
     assert payload["model"]["name"] == payload["best_model"]["name"]
 
 
+def test_training_request_accepts_group_column_and_excludes_it_from_features(upload_dir):
+    dataset_name = "api_group_regression_test.csv"
+    dataframe = pd.DataFrame(
+        [
+            {"group": f"g-{group_index}", "feature": group_index + row_index / 10, "target": group_index * 2 + row_index}
+            for group_index in range(20)
+            for row_index in range(5)
+        ]
+    )
+    dataframe.to_csv(upload_dir / dataset_name, index=False)
+
+    response = client.post(
+        "/train/",
+        json={
+            "filename": dataset_name,
+            "target_column": "target",
+            "group_column": "group",
+            "problem_type": "Regression",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["preprocessing"]["removed_columns"]["group_columns"] == ["group"]
+
+
 def test_valid_binary_classification_training_request(upload_dir):
     dataset_name = "api_binary_test.csv"
     _make_binary_dataset(upload_dir / dataset_name)

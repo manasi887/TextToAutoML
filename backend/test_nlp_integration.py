@@ -71,6 +71,29 @@ class NlpIntegrationTests(unittest.TestCase):
         self.assertEqual(result["nlp_resolution"], self.resolution)
         self.assertFalse(result["needs_clarification"])
 
+    def test_forwards_selected_group_column_to_automl(self) -> None:
+        nlp_result = {
+            "ready_for_training": True,
+            "dataset_resolution": self.resolution,
+        }
+        with patch(
+            "services.automl.nlp_integration.run_automl_pipeline",
+            return_value={"status": "success"},
+        ) as run_mock:
+            integrate_nlp_with_automl(
+                self.dataframe,
+                nlp_result,
+                group_column="student_id",
+            )
+
+        run_mock.assert_called_once_with(
+            self.dataframe,
+            "Exited",
+            "Binary Classification",
+            excluded_target_columns=[],
+            group_column="student_id",
+        )
+
     def test_rejects_missing_resolution(self) -> None:
         with self.assertRaises(ValueError):
             integrate_nlp_with_automl(

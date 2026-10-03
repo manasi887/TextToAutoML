@@ -39,3 +39,15 @@ def test_vague_request_does_not_produce_a_target():
     assert result["target_reference"] is None
     assert result["target_found"] is False
     assert result["needs_clarification"] is True
+
+
+def test_extracts_explicit_target_column_from_middle_of_regression_prompt():
+    result = extract_target_reference(
+        "This is a regression task. Predict the numerical value in the "
+        "median_house_value column using the other columns in the dataset. "
+        "Use median_house_value as the target column. Do not predict any other column."
+    )
+
+    assert result["target_found"] is True
+    assert result["needs_clarification"] is False
+    assert "median_house_value" in result["target_reference"]

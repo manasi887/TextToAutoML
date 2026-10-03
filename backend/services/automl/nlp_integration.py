@@ -34,7 +34,10 @@ def _json_safe(value: Any) -> Any:
 
 
 def integrate_nlp_with_automl(
-    df: pd.DataFrame, nlp_result: dict[str, Any], dataset_name: str | None = None
+    df: pd.DataFrame,
+    nlp_result: dict[str, Any],
+    dataset_name: str | None = None,
+    group_column: str | None = None,
 ) -> dict[str, Any]:
     """Run AutoML only when NLP resolution confirms training readiness."""
     if not isinstance(df, pd.DataFrame):
@@ -80,11 +83,16 @@ def integrate_nlp_with_automl(
                     excluded_target_columns = [column]
 
     training_started_at = time.perf_counter()
+    pipeline_options: dict[str, Any] = {
+        "excluded_target_columns": excluded_target_columns,
+    }
+    if group_column is not None:
+        pipeline_options["group_column"] = group_column
     training_output = run_automl_pipeline(
         df,
         target_column,
         problem_type,
-        excluded_target_columns=excluded_target_columns,
+        **pipeline_options,
     )
     training_time_seconds = round(time.perf_counter() - training_started_at, 6)
     training_output = {

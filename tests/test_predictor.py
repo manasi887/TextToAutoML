@@ -28,6 +28,11 @@ class RegressionPredictModel:
         return [float(row.sum()) for row in X]
 
 
+class NonFiniteRegressionPredictModel:
+    def predict(self, X):
+        return np.full(len(X), np.nan)
+
+
 class OrderAwareModel:
     def predict(self, X):
         expected = ["Age", "Balance", "country_France", "country_Germany", "gender_Female", "gender_Male"]
@@ -121,6 +126,45 @@ def test_predict_with_model_missing_required_feature(package_store_dir):
     package = _make_model_package(package_store_dir)
     result = predict_with_model(package, [{"Age": 30, "Balance": 1000}])
     assert result["predictions"] in ([0], [1])
+
+
+def test_predict_with_model_ignores_unexpected_feature_and_imputes_missing(package_store_dir):
+    package = _make_model_package(package_store_dir, kind="regression")
+
+    result = predict_with_model(package, [{"country": "Germany", "unexpected": "ignored"}])
+
+    assert result["status"] == "success"
+    assert result["predictions"] == [31.0]
+
+
+def test_predict_with_model_rejects_invalid_numeric_feature(package_store_dir):
+    package = _make_model_package(package_store_dir, kind="regression")
+
+    with pytest.raises(ValueError, match="Age.*numeric"):
+        predict_with_model(package, [{"Age": "not-a-number", "country": "France"}])
+
+
+def test_predict_with_model_rejects_non_finite_regression_predictions(package_store_dir):
+    package = _make_model_package(package_store_dir, kind="regression")
+    package["model"] = NonFiniteRegressionPredictModel()
+
+    with pytest.raises(ValueError, match="non-finite predictions"):
+        predict_with_model(package, [{"Age": 30, "country": "France"}])
+
+
+def test_predict_with_model_rejects_wrong_prediction_count(package_store_dir):
+    package = _make_model_package(package_store_dir, kind="regression")
+
+    class WrongCountModel:
+        def predict(self, X):
+            return [1.0]
+
+    package["model"] = WrongCountModel()
+    with pytest.raises(ValueError, match="different number of predictions"):
+        predict_with_model(package, [
+            {"Age": 30, "country": "France"},
+            {"Age": 40, "country": "Germany"},
+        ])
 
 
 def test_predict_with_model_optional_empty_record_uses_saved_imputation(package_store_dir):

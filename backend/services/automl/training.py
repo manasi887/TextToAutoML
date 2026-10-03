@@ -8,20 +8,35 @@ from sklearn.base import clone
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.cluster import DBSCAN, KMeans
 from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.model_selection import KFold, ParameterGrid, StratifiedKFold
+from sklearn.model_selection import (
+    GroupKFold,
+    KFold,
+    ParameterGrid,
+    StratifiedGroupKFold,
+    StratifiedKFold,
+)
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
     accuracy_score,
+    balanced_accuracy_score,
+    confusion_matrix,
     f1_score,
     mean_absolute_error,
     precision_score,
+    precision_recall_fscore_support,
     r2_score,
     recall_score,
     root_mean_squared_error,
     silhouette_score,
 )
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+
+from .trainer import (
+    prepare_training_data,
+    transform_training_features,
+    transform_training_target,
+)
 
 
 def _build_model_specs(
@@ -230,6 +245,21 @@ def evaluate_models(
                 predictions = model.predict(X_test)
                 y_true = np.asarray(y_test)
                 y_pred = np.asarray(predictions)
+                labels = np.unique(np.concatenate((y_true, y_pred)))
+                class_precision, class_recall, class_f1, class_support = (
+                    precision_recall_fscore_support(
+                        y_true,
+                        y_pred,
+                        labels=labels,
+                        average=None,
+                        zero_division=0,
+                    )
+                )
+                matrix = (
+                    confusion_matrix(y_true, y_pred, labels=labels).tolist()
+                    if len(labels) <= 100
+                    else None
+                )
                 metrics = {
                     "accuracy": float(accuracy_score(y_true, y_pred)),
                     "precision": float(
@@ -241,6 +271,27 @@ def evaluate_models(
                     "f1_score": float(
                         f1_score(y_true, y_pred, average="weighted", zero_division=0)
                     ),
+                    "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
+                    "macro_precision": float(
+                        precision_score(y_true, y_pred, average="macro", zero_division=0)
+                    ),
+                    "macro_recall": float(
+                        recall_score(y_true, y_pred, average="macro", zero_division=0)
+                    ),
+                    "macro_f1_score": float(
+                        f1_score(y_true, y_pred, average="macro", zero_division=0)
+                    ),
+                    "confusion_matrix": matrix,
+                    "confusion_matrix_labels": [str(label) for label in labels],
+                    "per_class_metrics": {
+                        str(label): {
+                            "precision": float(class_precision[index]),
+                            "recall": float(class_recall[index]),
+                            "f1_score": float(class_f1[index]),
+                            "support": int(class_support[index]),
+                        }
+                        for index, label in enumerate(labels)
+                    },
                 }
             else:
                 raise ValueError(f"Unsupported problem type for evaluation: {problem_type}")
@@ -263,11 +314,31 @@ def evaluate_models(
     }
 
 
-def _safe_cv_folds(y: pd.Series, problem_type: str) -> int | None:
+def _safe_cv_folds(
+    y: pd.Series,
+    problem_type: str,
+    groups: pd.Series | None = None,
+) -> int | None:
     """Return a safe fold count for supervised CV without crashing on tiny datasets."""
     normalized_type = (problem_type or "").strip().lower()
+    if groups is not None:
+        y = y.reset_index(drop=True)
+        groups = pd.Series(groups).reset_index(drop=True)
+        if len(y) != len(groups) or groups.isna().any():
+            return None
+        group_count = int(groups.nunique())
+        if group_count < 2:
+            return None
+    else:
+        group_count = len(y)
 
     if "classification" in normalized_type:
+        if groups is not None:
+            class_group_counts = pd.DataFrame({"label": y, "group": groups})
+            class_group_counts = class_group_counts.drop_duplicates().groupby("label")["group"].nunique()
+            if class_group_counts.empty or int(class_group_counts.min()) < 2:
+                return None
+            return min(5, group_count, int(class_group_counts.min()))
         value_counts = y.dropna().value_counts()
         if value_counts.empty:
             return None
@@ -279,7 +350,7 @@ def _safe_cv_folds(y: pd.Series, problem_type: str) -> int | None:
     if "regression" in normalized_type:
         if len(y) < 2:
             return None
-        return min(5, len(y))
+        return min(3, group_count)
 
     return None
 
@@ -289,6 +360,7 @@ def evaluate_models_cv(
     X_train: pd.DataFrame,
     y_train: pd.Series,
     problem_type: str,
+    groups: pd.Series | None = None,
 ) -> Dict[str, object]:
     """Cross-validate models on the training split only using task-specific metrics."""
     normalized_type = (problem_type or "").strip().lower()
@@ -304,18 +376,23 @@ def evaluate_models_cv(
 
     for model_name, model in models.items():
         try:
-            n_splits = _safe_cv_folds(y_train, problem_type)
+            n_splits = _safe_cv_folds(y_train, problem_type, groups)
             if n_splits is None:
                 errors.append({
                     "model_name": model_name,
-                    "error": "Dataset is too small for 5-fold supervised CV; skipping CV scoring.",
+                    "error": "Dataset is too small for supervised CV; skipping CV scoring.",
                 })
                 continue
 
             if "classification" in normalized_type:
-                cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+                cv = (
+                    StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=42)
+                    if groups is not None
+                    else StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+                )
                 fold_scores = []
-                for train_idx, valid_idx in cv.split(X_train, y_train):
+                split_iterator = cv.split(X_train, y_train, groups) if groups is not None else cv.split(X_train, y_train)
+                for train_idx, valid_idx in split_iterator:
                     fold_model = clone(model)
                     fold_model.fit(X_train.iloc[train_idx], y_train.iloc[train_idx])
                     y_pred = fold_model.predict(X_train.iloc[valid_idx])
@@ -331,9 +408,14 @@ def evaluate_models_cv(
                     )
                 metrics = {"f1_score": float(np.mean(fold_scores))}
             elif "regression" in normalized_type:
-                cv = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+                cv = (
+                    GroupKFold(n_splits=n_splits)
+                    if groups is not None
+                    else KFold(n_splits=n_splits, shuffle=True, random_state=42)
+                )
                 fold_scores = []
-                for train_idx, valid_idx in cv.split(X_train):
+                split_iterator = cv.split(X_train, y_train, groups) if groups is not None else cv.split(X_train)
+                for train_idx, valid_idx in split_iterator:
                     fold_model = clone(model)
                     fold_model.fit(X_train.iloc[train_idx], y_train.iloc[train_idx])
                     y_pred = fold_model.predict(X_train.iloc[valid_idx])
@@ -366,6 +448,11 @@ def tune_selected_model(
     X_train: pd.DataFrame,
     y_train: pd.Series,
     problem_type: str,
+    *,
+    raw_training_df: pd.DataFrame | None = None,
+    target_column: str | None = None,
+    preparation_function: Any | None = None,
+    group_column: str | None = None,
 ) -> Dict[str, object]:
     """Run a small CV-only search for the selected supervised model family."""
     normalized_type = (problem_type or "").strip().lower()
@@ -378,7 +465,7 @@ def tune_selected_model(
         "RandomForestClassifier": {"n_estimators": [100, 200]},
         "LinearRegression": {"fit_intercept": [True, False]},
         "DecisionTreeRegressor": {"max_depth": [None, 5]},
-        "RandomForestRegressor": {"n_estimators": [100, 200]},
+        "RandomForestRegressor": {"n_estimators": [50, 100]},
     }
     parameter_grid = search_spaces.get(model_name)
     if parameter_grid is None or (
@@ -389,13 +476,73 @@ def tune_selected_model(
 
     candidates = []
     errors: List[Dict[str, Any]] = []
+    cv_splitter = None
+    groups = None
+    if group_column is not None:
+        if raw_training_df is None or group_column not in raw_training_df.columns:
+            return {
+                "model": model,
+                "status": "Failed",
+                "errors": [{
+                    "model_name": model_name,
+                    "error": f"Group-aware CV requires group column '{group_column}' in the raw training data.",
+                }],
+            }
+        groups = raw_training_df[group_column].reset_index(drop=True)
+        if groups.isna().any():
+            return {
+                "model": model,
+                "status": "Failed",
+                "errors": [{"model_name": model_name, "error": f"Group column '{group_column}' contains missing values."}],
+            }
+    if raw_training_df is not None and target_column is not None:
+        n_splits = _safe_cv_folds(raw_training_df[target_column], problem_type, groups)
+        if n_splits is None:
+            return {
+                "model": model,
+                "status": "Failed" if group_column is not None else "Fallback",
+                "errors": [{
+                    "model_name": model_name,
+                    "error": (
+                        "Insufficient groups for group-aware CV. At least two groups are required, "
+                        "and each class must occur in at least two groups."
+                        if group_column is not None
+                        else "Dataset is too small for supervised CV; using the baseline model."
+                    ),
+                }],
+            }
+        if "classification" in normalized_type:
+            cv_splitter = (
+                StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=42)
+                if groups is not None
+                else StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+            )
+        else:
+            cv_splitter = (
+                GroupKFold(n_splits=n_splits)
+                if groups is not None
+                else KFold(n_splits=n_splits, shuffle=True, random_state=42)
+            )
+
     try:
         for parameters in ParameterGrid(parameter_grid):
             candidate = clone(model)
             candidate.set_params(**parameters)
-            evaluation = evaluate_models_cv(
-                {model_name: candidate}, X_train, y_train, problem_type
-            )
+            if cv_splitter is not None and raw_training_df is not None and target_column is not None:
+                evaluation = _evaluate_model_cv_with_preprocessing(
+                    model_name,
+                    candidate,
+                    raw_training_df,
+                    target_column,
+                    problem_type,
+                    cv_splitter,
+                    preparation_function or prepare_training_data,
+                    group_column=group_column,
+                )
+            else:
+                evaluation = evaluate_models_cv(
+                    {model_name: candidate}, X_train, y_train, problem_type
+                )
             results = evaluation.get("results", [])
             if results:
                 candidates.append((results[0]["metrics"], candidate, parameters))
@@ -422,6 +569,91 @@ def tune_selected_model(
         "errors": errors,
         "parameters": best_parameters,
         "metrics": best_metrics,
+    }
+
+
+def _evaluate_model_cv_with_preprocessing(
+    model_name: str,
+    model: Any,
+    raw_training_df: pd.DataFrame,
+    target_column: str,
+    problem_type: str,
+    cv: Any,
+    preparation_function: Any,
+    group_column: str | None = None,
+) -> Dict[str, object]:
+    """Evaluate a candidate with imputation/encoding fitted inside each CV fold."""
+    fold_metrics: list[dict[str, float]] = []
+    errors: list[dict[str, Any]] = []
+    normalized_type = (problem_type or "").strip().lower()
+    y_raw = raw_training_df[target_column].reset_index(drop=True)
+    groups = (
+        raw_training_df[group_column].reset_index(drop=True)
+        if group_column is not None
+        else None
+    )
+
+    try:
+        if groups is not None:
+            split_iterator = cv.split(raw_training_df, y_raw, groups)
+        elif "classification" in normalized_type:
+            split_iterator = cv.split(raw_training_df, y_raw)
+        else:
+            split_iterator = cv.split(raw_training_df)
+        for train_indices, validation_indices in split_iterator:
+            fold_train = raw_training_df.iloc[train_indices].reset_index(drop=True)
+            fold_validation = raw_training_df.iloc[validation_indices].reset_index(drop=True)
+            preparation = preparation_function(fold_train, target_column)
+            X_validation = transform_training_features(
+                fold_validation.drop(columns=[target_column]), preparation
+            )
+            y_validation = transform_training_target(
+                fold_validation[target_column], preparation
+            )
+            fold_model = clone(model)
+            fold_model.fit(preparation["X"], preparation["y"])
+            predictions = np.asarray(fold_model.predict(X_validation))
+
+            if "regression" in normalized_type:
+                metrics = {
+                    "rmse": float(root_mean_squared_error(y_validation, predictions)),
+                    "mae": float(mean_absolute_error(y_validation, predictions)),
+                }
+                if len(y_validation) >= 2:
+                    metrics["r2"] = float(r2_score(y_validation, predictions))
+            elif "classification" in normalized_type:
+                metrics = {
+                    "f1_score": float(
+                        f1_score(
+                            y_validation,
+                            predictions,
+                            average="weighted",
+                            zero_division=0,
+                        )
+                    )
+                }
+            else:
+                raise ValueError(f"Unsupported problem type for CV evaluation: {problem_type}")
+            fold_metrics.append(metrics)
+    except Exception as exc:
+        errors.append({"model_name": model_name, "error": str(exc)})
+
+    if not fold_metrics:
+        return {"results": [], "status": "Failed", "errors": errors}
+
+    metrics = {
+        metric: float(np.mean([fold[metric] for fold in fold_metrics if metric in fold]))
+        for metric in fold_metrics[0]
+    }
+    return {
+        "results": [{
+            "model_name": model_name,
+            "model": model,
+            "metrics": metrics,
+            "status": "CV Evaluated",
+        }],
+        "status": "Completed",
+        "errors": errors,
     }
 
 
@@ -483,6 +715,7 @@ def select_best_model(
             "selection_reason": f"No results had a valid {metric_name} metric.",
         }
 
+    valid_results.sort(key=lambda item: str(item.get("model_name", "")))
     best_result = selector(valid_results, key=lambda item: float(item["metrics"][metric_name]))
     best_metrics = best_result.get("metrics", {})
     best_name = best_result.get("model_name")

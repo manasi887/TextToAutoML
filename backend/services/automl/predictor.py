@@ -120,6 +120,27 @@ def _apply_missing_value_strategy(df: pd.DataFrame, model_package: dict[str, Any
     return df
 
 
+def _validate_numeric_features(df: pd.DataFrame, model_package: dict[str, Any]) -> pd.DataFrame:
+    preprocessing = model_package.get("preprocessing", {}) or {}
+    imputed_columns = preprocessing.get("imputed_columns", {}) or {}
+    numeric_columns = set(imputed_columns.get("numeric", []) or [])
+    numeric_columns.update(
+        (preprocessing.get("imputation_values", {}).get("numeric", {}) or {}).keys()
+    )
+
+    for column in numeric_columns.intersection(df.columns):
+        original = df[column]
+        converted = pd.to_numeric(original, errors="coerce")
+        invalid_values = original.notna() & converted.isna()
+        if invalid_values.any():
+            raise ValueError(f"Feature '{column}' must contain numeric values.")
+        finite_values = converted.dropna().to_numpy(dtype=float)
+        if finite_values.size and not np.isfinite(finite_values).all():
+            raise ValueError(f"Feature '{column}' must contain finite numeric values.")
+        df[column] = converted
+    return df
+
+
 def _apply_saved_encoders(df: pd.DataFrame, model_package: dict[str, Any]) -> pd.DataFrame:
     encoders = model_package.get("encoders", {}) or {}
     if not isinstance(encoders, dict):
@@ -183,11 +204,23 @@ def predict_with_model(model_package: dict[str, Any], input_data: Any) -> dict[s
         raise ValueError("A valid persisted model package is required for prediction.")
 
     raw_df = _validate_prediction_input(model_package, input_data)
+    raw_df = _validate_numeric_features(raw_df, model_package)
     raw_df = _apply_missing_value_strategy(raw_df, model_package)
     encoded_df = _apply_saved_encoders(raw_df, model_package)
 
     model = model_package["model"]
-    predictions = model.predict(encoded_df)
+    predictions = np.asarray(model.predict(encoded_df))
+    if predictions.ndim == 0:
+        predictions = predictions.reshape(1)
+    if predictions.shape[0] != len(encoded_df):
+        raise ValueError("The model returned a different number of predictions than input records.")
+    if str(model_package.get("problem_type", "")).lower().find("regression") >= 0:
+        try:
+            predictions = predictions.astype(float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("The regression model returned non-numeric predictions.") from exc
+    if np.issubdtype(predictions.dtype, np.number) and not np.isfinite(predictions).all():
+        raise ValueError("The model returned non-finite predictions.")
     predictions = _to_python_scalar(predictions)
     if isinstance(predictions, list):
         prediction_list = predictions

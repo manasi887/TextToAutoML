@@ -61,7 +61,11 @@ class _OneHotEncoder:
         return self.fit(series).transform(series)
 
 
-def prepare_training_data(df: pd.DataFrame, target_column: str) -> Dict[str, object]:
+def prepare_training_data(
+    df: pd.DataFrame,
+    target_column: str,
+    group_column: str | None = None,
+) -> Dict[str, object]:
       """
       Prepare a dataset for machine learning (data preparation stage of AutoML).
 
@@ -81,6 +85,10 @@ def prepare_training_data(df: pd.DataFrame, target_column: str) -> Dict[str, obj
       # Validate target
       if target_column not in df.columns:
           raise ValueError(f"Target column '{target_column}' is not present in the DataFrame.")
+      if group_column is not None and group_column not in df.columns:
+          raise ValueError(f"Group column '{group_column}' is not present in the DataFrame.")
+      if group_column == target_column:
+          raise ValueError("Group column must be different from the target column.")
 
       working_df = df.copy()
 
@@ -90,7 +98,10 @@ def prepare_training_data(df: pd.DataFrame, target_column: str) -> Dict[str, obj
 
       # Separate X and y
       y = working_df[target_column]
-      X = working_df.drop(columns=[target_column])
+      columns_to_exclude = [target_column]
+      if group_column is not None:
+          columns_to_exclude.append(group_column)
+      X = working_df.drop(columns=columns_to_exclude)
 
       # Capture target metadata before any transformation
       target_dtype = str(y.dtype)
@@ -111,6 +122,7 @@ def prepare_training_data(df: pd.DataFrame, target_column: str) -> Dict[str, obj
       removed_columns = {
           "identifier_columns": identifier_cols,
           "constant_columns": constant_cols,
+          "group_columns": [group_column] if group_column is not None else [],
       }
 
       cols_to_drop = identifier_cols + constant_cols
@@ -182,6 +194,303 @@ def prepare_training_data(df: pd.DataFrame, target_column: str) -> Dict[str, obj
           "encoders": encoders,
           "preprocessing": preprocessing_metadata,
       }
+
+
+def split_dataset_train_validation_test(
+    df: pd.DataFrame,
+    target_column: str,
+    test_size: float = 0.2,
+    validation_size: float = 0.2,
+    problem_type: str | None = None,
+    random_state: int = 42,
+    group_column: str | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Split rows before fitting preprocessing, keeping test rows isolated."""
+    if target_column not in df.columns:
+        raise ValueError(f"Target column '{target_column}' is not present in the DataFrame.")
+    if test_size <= 0 or validation_size <= 0 or test_size + validation_size >= 1:
+        raise ValueError("test_size and validation_size must be positive and sum to less than one.")
+
+    rows = df.loc[df[target_column].notna()].drop_duplicates().reset_index(drop=True)
+    if group_column is not None:
+        return _split_dataset_by_group(
+            rows,
+            target_column=target_column,
+            group_column=group_column,
+            test_size=test_size,
+            validation_size=validation_size,
+            problem_type=problem_type,
+            random_state=random_state,
+        )
+
+    indices = np.arange(len(rows))
+    labels = rows[target_column]
+    stratify = labels if "classification" in str(problem_type or "").lower() else None
+
+    from sklearn.model_selection import train_test_split
+
+    def split_indices(
+        selected_indices: np.ndarray,
+        selected_labels: pd.Series,
+        fraction: float,
+        seed: int,
+        use_stratification: bool,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        try:
+            return train_test_split(
+                selected_indices,
+                test_size=fraction,
+                random_state=seed,
+                stratify=selected_labels if use_stratification else None,
+            )
+        except ValueError:
+            if not use_stratification:
+                raise
+            return train_test_split(
+                selected_indices,
+                test_size=fraction,
+                random_state=seed,
+                stratify=None,
+            )
+
+    train_validation_indices, test_indices = split_indices(
+        indices,
+        labels,
+        test_size,
+        random_state,
+        stratify is not None,
+    )
+    validation_fraction = validation_size / (1.0 - test_size)
+    train_indices, validation_indices = split_indices(
+        train_validation_indices,
+        labels.iloc[train_validation_indices],
+        validation_fraction,
+        random_state + 1,
+        stratify is not None,
+    )
+
+    return tuple(
+        rows.iloc[part].reset_index(drop=True)
+        for part in (train_indices, validation_indices, test_indices)
+    )
+
+
+def _split_dataset_by_group(
+    rows: pd.DataFrame,
+    *,
+    target_column: str,
+    group_column: str,
+    test_size: float,
+    validation_size: float,
+    problem_type: str | None,
+    random_state: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Create deterministic group-disjoint partitions with best-effort stratification."""
+    from sklearn.model_selection import GroupShuffleSplit, StratifiedGroupKFold
+
+    if group_column not in rows.columns:
+        raise ValueError(f"Group column '{group_column}' is not present in the DataFrame.")
+    if group_column == target_column:
+        raise ValueError("Group column must be different from the target column.")
+    if rows[group_column].isna().any():
+        raise ValueError(f"Group column '{group_column}' contains missing values.")
+
+    labels = rows[target_column].reset_index(drop=True)
+    groups = rows[group_column].reset_index(drop=True)
+    unique_group_count = int(groups.nunique(dropna=False))
+    if unique_group_count < 3:
+        raise ValueError(
+            "Group-aware train/validation/test splitting requires at least 3 distinct groups."
+        )
+
+    is_classification = "classification" in str(problem_type or "").lower()
+
+    def choose_partition(
+        indices: np.ndarray,
+        fraction: float,
+        seed: int,
+        partition_name: str,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        selected_groups = groups.iloc[indices].reset_index(drop=True)
+        selected_labels = labels.iloc[indices].reset_index(drop=True)
+        group_count = int(selected_groups.nunique())
+        candidates: list[tuple[np.ndarray, np.ndarray]] = []
+
+        if is_classification:
+            folds = max(2, int(round(1.0 / fraction)))
+            if group_count < folds:
+                raise ValueError(
+                    f"Group-aware {partition_name} split needs at least {folds} distinct groups; found {group_count}."
+                )
+            class_group_counts = pd.DataFrame(
+                {"label": selected_labels, "group": selected_groups}
+            ).drop_duplicates().groupby("label")["group"].nunique()
+            if class_group_counts.empty or int(class_group_counts.min()) < 2:
+                raise ValueError(
+                    f"Group-aware {partition_name} split cannot preserve classes because a class occurs in fewer than 2 groups."
+                )
+            seeds = range(seed, seed + 12)
+            for split_seed in seeds:
+                splitter = StratifiedGroupKFold(
+                    n_splits=folds,
+                    shuffle=True,
+                    random_state=split_seed,
+                )
+                candidates.extend(
+                    (indices[keep], indices[holdout])
+                    for keep, holdout in splitter.split(
+                        np.zeros(len(indices)), selected_labels, selected_groups
+                    )
+                )
+        else:
+            if group_count < 2:
+                raise ValueError(
+                    f"Group-aware {partition_name} split requires at least 2 distinct groups."
+                )
+            splitter = GroupShuffleSplit(
+                n_splits=64,
+                test_size=fraction,
+                random_state=seed,
+            )
+            candidates.extend(
+                (indices[keep], indices[holdout])
+                for keep, holdout in splitter.split(
+                    np.zeros(len(indices)), groups=selected_groups
+                )
+            )
+
+        if not candidates:
+            raise ValueError(f"Could not create a group-aware {partition_name} split.")
+
+        full_distribution = selected_labels.value_counts(normalize=True)
+
+        def quality(candidate: tuple[np.ndarray, np.ndarray]) -> tuple[float, float]:
+            _, holdout = candidate
+            actual_fraction = len(holdout) / len(indices)
+            size_error = abs(actual_fraction - fraction)
+            if not is_classification:
+                return size_error, size_error
+            holdout_distribution = labels.iloc[holdout].value_counts(normalize=True)
+            class_error = sum(
+                abs(float(full_distribution.get(label, 0.0)) - float(holdout_distribution.get(label, 0.0)))
+                for label in full_distribution.index
+            ) / 2.0
+            return class_error + size_error, size_error
+
+        return min(candidates, key=quality)
+
+    all_indices = np.arange(len(rows))
+    train_validation_indices, test_indices = choose_partition(
+        all_indices, test_size, random_state, "test"
+    )
+    validation_fraction = validation_size / (1.0 - test_size)
+    train_indices, validation_indices = choose_partition(
+        train_validation_indices,
+        validation_fraction,
+        random_state + 1,
+        "validation",
+    )
+
+    partitions = (train_indices, validation_indices, test_indices)
+    partition_groups = [set(groups.iloc[index]) for index in partitions]
+    if any(
+        partition_groups[left] & partition_groups[right]
+        for left in range(len(partition_groups))
+        for right in range(left + 1, len(partition_groups))
+    ):
+        raise RuntimeError("Group-aware splitter produced overlapping groups.")
+
+    if is_classification:
+        expected_classes = set(labels.unique())
+        missing_classes = [
+            index
+            for index in partitions
+            if set(labels.iloc[index].unique()) != expected_classes
+        ]
+        if missing_classes:
+            raise ValueError(
+                "Group constraints prevent every class from appearing in all train, validation, and test partitions."
+            )
+
+    return tuple(rows.iloc[index].reset_index(drop=True) for index in partitions)
+
+
+def transform_training_features(
+    df: pd.DataFrame,
+    preparation: Dict[str, object],
+) -> pd.DataFrame:
+    """Apply fitted training imputers and encoders to held-out raw features."""
+    metadata = preparation.get("preprocessing", {})
+    if not isinstance(metadata, dict):
+        raise ValueError("Training preprocessing metadata is missing or invalid.")
+    raw_feature_names = list(metadata.get("raw_feature_names", []))
+    feature_names = list(preparation.get("feature_names", []))
+    encoders = preparation.get("encoders", {})
+    if not raw_feature_names or not feature_names or not isinstance(encoders, dict):
+        raise ValueError("Training preprocessing metadata does not define feature columns and encoders.")
+
+    features = df.reindex(columns=raw_feature_names).copy()
+    imputation_values = metadata.get("imputation_values", {})
+    numeric_values = imputation_values.get("numeric", {})
+    categorical_values = imputation_values.get("categorical", {})
+    for column in features.columns:
+        if column in numeric_values:
+            features[column] = features[column].fillna(numeric_values[column])
+        elif column in categorical_values:
+            features[column] = features[column].fillna(categorical_values[column])
+        elif features[column].isna().any():
+            raise ValueError(
+                f"No training-time imputation value is available for feature '{column}'."
+            )
+
+    encoded_parts: list[pd.DataFrame] = []
+    for column in features.columns:
+        encoder_info = encoders.get(column, {})
+        encoder = encoder_info.get("encoder") if isinstance(encoder_info, dict) else None
+        if encoder is None:
+            encoded_parts.append(features[[column]])
+            continue
+
+        values = features[column].astype(str).to_numpy().reshape(-1, 1)
+        transformed = encoder.transform(values)
+        if encoder_info.get("type") == "onehot":
+            dense_values = np.asarray(transformed)
+            if hasattr(dense_values, "toarray"):
+                dense_values = dense_values.toarray()
+            columns = encoder_info.get("feature_names", [])
+            encoded_parts.append(
+                pd.DataFrame(dense_values, columns=columns, index=features.index)
+            )
+        else:
+            dense_values = np.asarray(transformed).reshape(-1)
+            encoded_parts.append(
+                pd.DataFrame({column: dense_values}, index=features.index)
+            )
+
+    encoded = pd.concat(encoded_parts, axis=1)
+    missing_features = [name for name in feature_names if name not in encoded.columns]
+    if missing_features:
+        raise ValueError(
+            "Held-out data did not produce expected feature(s): "
+            f"{', '.join(missing_features)}"
+        )
+    return encoded[feature_names].copy()
+
+
+def transform_training_target(values: pd.Series, preparation: Dict[str, object]) -> pd.Series:
+    """Apply the target encoder fitted on the corresponding training partition."""
+    metadata = preparation.get("preprocessing", {})
+    if not isinstance(metadata, dict) or not metadata.get("target_encoded"):
+        return values.reset_index(drop=True)
+
+    encoder = metadata.get("target_encoder")
+    if encoder is None:
+        raise ValueError("Training preprocessing metadata is missing its target encoder.")
+    label_mapping = {
+        label: index for index, label in enumerate(encoder.classes_)
+    }
+    encoded = values.fillna("<missing>").astype(str).map(label_mapping).fillna(-1)
+    return encoded.astype("int64").reset_index(drop=True)
 
 
 def prepare_clustering_data(

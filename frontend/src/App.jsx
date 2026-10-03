@@ -1,4 +1,14 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import {
+  buildPredictionRecord as createPredictionRecord,
+  getPredictionConfig,
+  getEvaluationSummary,
+} from "./prediction.js";
+import {
+  buildNlpTrainingRequest,
+  createLatestRequestTracker,
+  getGroupColumnOptions,
+} from "./training.js";
 
 const pageStyle = {
   minHeight: "100vh",
@@ -31,6 +41,15 @@ function formatDuration(seconds) {
     : `${minutes} min`;
 }
 
+function formatPredictionMetric(metric) {
+  if (metric.value === null || metric.value === undefined) return "Not available";
+  const value = Number(metric.value);
+  if (!Number.isFinite(value)) return "Not available";
+  return metric.format === "percentage"
+    ? `${(value * 100).toFixed(1)}%`
+    : value.toFixed(3);
+}
+
 export default function App() {
   const [fileName, setFileName] = useState("");
   const [task, setTask] = useState("");
@@ -41,14 +60,120 @@ export default function App() {
   const [analyzeError, setAnalyzeError] = useState("");
   const [analyzeResult, setAnalyzeResult] = useState(null);
   const [trainingConfirmed, setTrainingConfirmed] = useState(false);
+  const [groupColumn, setGroupColumn] = useState("");
   const [trainingState, setTrainingState] = useState("idle");
   const [trainingError, setTrainingError] = useState("");
   const [trainingResult, setTrainingResult] = useState(null);
+  const [diagnosticState, setDiagnosticState] = useState("idle");
+  const [diagnosticError, setDiagnosticError] = useState("");
+  const [diagnosticResult, setDiagnosticResult] = useState(null);
+  const [diagnosticGroupColumn, setDiagnosticGroupColumn] = useState(null);
+  const [diagnosticRetry, setDiagnosticRetry] = useState(0);
+  const diagnosticTrackerRef = useRef(null);
+  if (diagnosticTrackerRef.current === null) {
+    diagnosticTrackerRef.current = createLatestRequestTracker();
+  }
   const [predictionState, setPredictionState] = useState("idle");
   const [predictionError, setPredictionError] = useState("");
   const [predictionMode, setPredictionMode] = useState("sample");
   const [predictionInputs, setPredictionInputs] = useState({});
   const [predictionResult, setPredictionResult] = useState(null);
+  const predictionConfig = getPredictionConfig(trainingResult);
+  const evaluationSummary = getEvaluationSummary(trainingResult);
+  const resolvedTargetColumn =
+    analyzeResult?.dataset_resolution?.target_column ||
+    analyzeResult?.target?.matched_column;
+  const sampleRow = uploadResult?.sample_rows?.[0];
+  const uploadedColumns = Object.keys(
+    sampleRow && Object.keys(sampleRow).length > 0
+      ? sampleRow
+      : uploadResult?.analysis?.data_types || {},
+  );
+  const groupColumnOptions = getGroupColumnOptions(
+    uploadedColumns,
+    resolvedTargetColumn,
+  );
+  const resolvedProblemType = String(
+    analyzeResult?.dataset_resolution?.problem_type || "",
+  ).toLowerCase();
+  const diagnosticApplicable = Boolean(
+    analyzeState === "success" &&
+      analyzeResult?.ready_for_training &&
+      resolvedTargetColumn &&
+      !resolvedProblemType.includes("cluster"),
+  );
+  const diagnosticReady = !diagnosticApplicable || (
+    diagnosticState === "success" && diagnosticGroupColumn === groupColumn
+  );
+
+  useEffect(() => {
+    const tracker = diagnosticTrackerRef.current;
+    const requestId = tracker.begin();
+    const controller = new AbortController();
+
+    if (!diagnosticApplicable || !fileName || !task.trim()) {
+      setDiagnosticState("idle");
+      setDiagnosticError("");
+      setDiagnosticResult(null);
+      setDiagnosticGroupColumn(null);
+      return () => {
+        controller.abort();
+        tracker.invalidate(requestId);
+      };
+    }
+
+    setDiagnosticState("loading");
+    setDiagnosticError("");
+    setDiagnosticResult(null);
+    setDiagnosticGroupColumn(null);
+
+    async function loadDiagnostic() {
+      try {
+        const response = await fetch("/nlp/diagnose-target-proxies", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(
+            buildNlpTrainingRequest({
+              filename: fileName,
+              text: task.trim(),
+              groupColumn,
+            }),
+          ),
+          signal: controller.signal,
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          const detail = payload.detail;
+          throw new Error(
+            typeof detail === "string"
+              ? detail
+              : detail?.message || "Target-proxy diagnostic failed.",
+          );
+        }
+        if (!tracker.isLatest(requestId)) return;
+        setDiagnosticResult(payload);
+        setDiagnosticGroupColumn(groupColumn);
+        setDiagnosticState("success");
+      } catch (error) {
+        if (controller.signal.aborted || !tracker.isLatest(requestId)) return;
+        setDiagnosticError(error.message || "Target-proxy diagnostic failed.");
+        setDiagnosticState("error");
+      }
+    }
+
+    loadDiagnostic();
+    return () => {
+      controller.abort();
+      tracker.invalidate(requestId);
+    };
+  }, [
+    analyzeState,
+    diagnosticApplicable,
+    diagnosticRetry,
+    fileName,
+    groupColumn,
+    task,
+  ]);
 
   async function handleFileChange(event) {
     const file = event.target.files?.[0];
@@ -57,6 +182,7 @@ export default function App() {
     }
 
     setFileName(file.name);
+    setGroupColumn("");
     setUploadState("loading");
     setUploadError("");
     setUploadResult(null);
@@ -108,6 +234,7 @@ export default function App() {
     setAnalyzeError("");
     setAnalyzeResult(null);
     setTrainingConfirmed(false);
+    setGroupColumn("");
     setTrainingState("idle");
     setTrainingError("");
     setTrainingResult(null);
@@ -154,7 +281,13 @@ export default function App() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ filename: fileName, text: task.trim() }),
+        body: JSON.stringify(
+          buildNlpTrainingRequest({
+            filename: fileName,
+            text: task.trim(),
+            groupColumn,
+          }),
+        ),
       });
       const payload = await response.json();
 
@@ -169,7 +302,7 @@ export default function App() {
       setPredictionError("");
       setPredictionMode("sample");
       setPredictionResult(null);
-      const rawFeatureNames = payload.automl_training?.preprocessing?.raw_feature_names || [];
+      const rawFeatureNames = getPredictionConfig(payload).featureNames;
       setPredictionInputs(
         Object.fromEntries(rawFeatureNames.map((column) => [column, ""]))
       );
@@ -180,10 +313,13 @@ export default function App() {
   }
 
   function getPredictionFeatures() {
-    return trainingResult?.automl_training?.preprocessing?.raw_feature_names || [];
+    return predictionConfig.featureNames;
   }
 
   function getFeatureType(column) {
+    const preprocessing = trainingResult?.automl_training?.preprocessing || {};
+    if (preprocessing.imputed_columns?.numeric?.includes(column)) return "number";
+    if (preprocessing.imputed_columns?.categorical?.includes(column)) return "object";
     return uploadResult?.analysis?.data_types?.[column] || "object";
   }
 
@@ -192,50 +328,16 @@ export default function App() {
   }
 
   function buildPredictionRecord() {
-    const features = getPredictionFeatures();
-    const record = {};
-    const targetColumn = trainingResult?.automl_training?.target_column || "";
-
-    if (predictionMode === "sample") {
-      const sample = uploadResult?.sample_rows?.[0] || {};
-      for (const column of features) {
-        if (column !== targetColumn && Object.prototype.hasOwnProperty.call(sample, column)) {
-          record[column] = sample[column];
-        }
-      }
-      return record;
-    }
-
-    for (const column of features) {
-      const value = predictionInputs[column];
-      if (value === undefined || value === "") {
-        continue;
-      }
-
-      const dtype = String(getFeatureType(column)).toLowerCase();
-      if (dtype.includes("bool")) {
-        const normalized = String(value).trim().toLowerCase();
-        if (!["true", "false"].includes(normalized)) {
-          throw new Error(`'${column}' must be true or false.`);
-        }
-        record[column] = normalized === "true";
-      } else if (
-        dtype.includes("int") ||
-        dtype.includes("float") ||
-        dtype.includes("double") ||
-        dtype.includes("number")
-      ) {
-        const numericValue = Number(value);
-        if (!Number.isFinite(numericValue)) {
-          throw new Error(`'${column}' must be a valid number.`);
-        }
-        record[column] = numericValue;
-      } else {
-        record[column] = value;
-      }
-    }
-
-    return record;
+    const featureTypes = Object.fromEntries(
+      getPredictionFeatures().map((column) => [column, getFeatureType(column)]),
+    );
+    return createPredictionRecord({
+      trainingResult,
+      predictionMode,
+      predictionInputs,
+      sampleRow: uploadResult?.sample_rows?.[0] || {},
+      featureTypes,
+    });
   }
 
   async function handlePredict() {
@@ -687,16 +789,16 @@ export default function App() {
                 >
                   <div>
                   <span style={{ display: "block", color: "#8a988e", fontSize: "12px" }}>
-                    Intent
+                    Classifier prediction
                   </span>
                   <strong>{analyzeResult.intent?.intent || "-"}</strong>
                   </div>
                   <div>
                   <span style={{ display: "block", color: "#8a988e", fontSize: "12px" }}>
-                    Problem type
+                    Resolved task
                   </span>
                   <strong>
-                    {analyzeResult.dataset_resolution?.problem_type || analyzeResult.task?.problem_type || "-"}
+                    {analyzeResult.dataset_resolution?.problem_type || "-"}
                   </strong>
                   </div>
                   <div>
@@ -709,7 +811,7 @@ export default function App() {
                   </div>
                   <div>
                   <span style={{ display: "block", color: "#8a988e", fontSize: "12px" }}>
-                    Confidence
+                    Classifier confidence
                   </span>
                   <strong>
                     {analyzeResult.intent?.confidence != null
@@ -741,10 +843,105 @@ export default function App() {
                 )}
                 </div>
                 <div style={{ marginTop: "22px" }}>
+                  <div style={{ marginBottom: "16px", maxWidth: "420px" }}>
+                    <label
+                      htmlFor="group-column"
+                      style={{
+                        display: "block",
+                        marginBottom: "6px",
+                        color: "#26372d",
+                        fontWeight: 600,
+                      }}
+                    >
+                      Group Column
+                    </label>
+                    <select
+                      id="group-column"
+                      aria-label="Group Column"
+                      value={groupColumn}
+                      onChange={(event) => setGroupColumn(event.target.value)}
+                      disabled={trainingState === "loading" || trainingConfirmed}
+                      style={{
+                        width: "100%",
+                        minHeight: "40px",
+                        padding: "8px 10px",
+                        border: "1px solid #cbd8ce",
+                        borderRadius: "4px",
+                        background: "#ffffff",
+                        color: "#17221d",
+                        font: "14px Arial, sans-serif",
+                      }}
+                    >
+                      <option value="">None</option>
+                      {groupColumnOptions.map((column) => (
+                        <option key={column} value={column}>
+                          {column}
+                        </option>
+                      ))}
+                    </select>
+                    <p style={{ margin: "6px 0 0", color: "#617066", fontSize: "12px", lineHeight: 1.5 }}>
+                      Group-aware splitting keeps records from the same entity together across train, validation, and test sets.
+                    </p>
+                  </div>
+                  {diagnosticApplicable && (
+                    <section
+                      aria-label="Target-proxy diagnostic"
+                      style={{
+                        maxWidth: "640px",
+                        marginBottom: "16px",
+                        padding: "12px",
+                        border: "1px solid #dbe5de",
+                        borderRadius: "4px",
+                        background: "#fbfcfa",
+                        font: "13px/1.5 Arial, sans-serif",
+                      }}
+                    >
+                      <strong>Feature relationship check</strong>
+                      <p style={{ margin: "5px 0 8px", color: "#526158" }}>
+                        Warnings show relationships observed in training rows. They do not prove leakage or that a feature is unavailable at prediction time; review each feature before continuing.
+                      </p>
+                      {diagnosticState === "loading" && (
+                        <p role="status" style={{ margin: 0 }}>Checking training features...</p>
+                      )}
+                      {diagnosticState === "error" && (
+                        <div role="alert" style={{ color: "#a13d35" }}>
+                          <span>{diagnosticError}</span>{" "}
+                          <button
+                            type="button"
+                            onClick={() => setDiagnosticRetry((value) => value + 1)}
+                          >
+                            Retry check
+                          </button>
+                        </div>
+                      )}
+                      {diagnosticState === "success" && diagnosticReady && (
+                        diagnosticResult?.warnings?.length ? (
+                          <ul style={{ margin: "6px 0 0", paddingLeft: "20px" }}>
+                            {diagnosticResult.warnings.map((warning, index) => (
+                              <li key={`${warning.feature}-${warning.detection_type}-${index}`}>
+                                <strong>{warning.feature}</strong>{" "}
+                                <span>({warning.detection_type})</span>
+                                <div>{warning.message}</div>
+                                <code>{JSON.stringify(warning.evidence)}</code>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <p style={{ margin: 0 }}>
+                            No exact target relationship was detected in the training partition.
+                          </p>
+                        )
+                      )}
+                    </section>
+                  )}
                   <button
                     type="button"
                     onClick={confirmTraining}
-                    disabled={trainingState === "loading" || trainingConfirmed}
+                    disabled={
+                      trainingState === "loading" ||
+                      trainingConfirmed ||
+                      (diagnosticApplicable && !diagnosticReady)
+                    }
                     style={{
                       padding: "11px 18px",
                       border: 0,
@@ -784,6 +981,151 @@ export default function App() {
 
         {trainingState === "success" && trainingResult && (
           <section
+            aria-label={`${evaluationSummary.problemType} Evaluation`}
+            style={{ ...panelStyle, marginTop: "20px", padding: "28px" }}
+          >
+            <h2 style={{ margin: "0 0 18px", fontSize: "22px", fontWeight: 500 }}>
+              {evaluationSummary.problemType === "classification"
+                ? "Classification Evaluation"
+                : evaluationSummary.problemType === "regression"
+                  ? "Regression Evaluation"
+                  : evaluationSummary.problemType === "clustering"
+                    ? "Clustering Evaluation"
+                    : "Model Evaluation"}
+            </h2>
+            {(() => {
+              const definitions = {
+                classification: [
+                  { label: "Holdout accuracy", key: "accuracy", format: "percentage" },
+                  { label: "Holdout weighted F1", key: "f1_score", format: "percentage" },
+                  { label: "Balanced accuracy", key: "balanced_accuracy", format: "percentage" },
+                  { label: "Macro precision", key: "macro_precision", format: "percentage" },
+                  { label: "Macro recall", key: "macro_recall", format: "percentage" },
+                  { label: "Macro F1", key: "macro_f1_score", format: "percentage" },
+                ],
+                regression: [
+                  { label: "Holdout RMSE", key: "rmse", format: "number" },
+                  { label: "Holdout MAE", key: "mae", format: "number" },
+                  { label: "Holdout R²", key: "r2", format: "number" },
+                ],
+                clustering: [
+                  { label: "Silhouette score", key: "silhouette_score", format: "number" },
+                ],
+              };
+              const metrics = definitions[evaluationSummary.problemType] || [];
+
+              return (
+                <>
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+                      gap: "14px 20px",
+                      marginBottom: evaluationSummary.problemType === "classification" ? "22px" : 0,
+                    }}
+                  >
+                    {metrics.map((metric) => (
+                      <div key={metric.key} style={{ borderLeft: "2px solid #7b9a82", paddingLeft: "10px" }}>
+                        <span style={{ display: "block", color: "#66756b", font: "12px Arial, sans-serif" }}>
+                          {metric.label}
+                        </span>
+                        <strong style={{ display: "block", marginTop: "4px", font: "600 17px Arial, sans-serif" }}>
+                          {formatPredictionMetric({
+                            ...metric,
+                            value: evaluationSummary.metrics[metric.key],
+                          })}
+                        </strong>
+                      </div>
+                    ))}
+                  </div>
+
+                  {evaluationSummary.problemType === "classification" && (
+                    <div
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
+                        gap: "24px",
+                        font: "13px/1.5 Arial, sans-serif",
+                      }}
+                    >
+                      {evaluationSummary.confusionMatrix && (
+                        <div>
+                          <h3 style={{ margin: "0 0 8px", fontSize: "15px", fontWeight: 600 }}>
+                            Confusion matrix
+                          </h3>
+                          <p style={{ margin: "0 0 8px", color: "#66756b", fontSize: "12px" }}>
+                            Rows: actual classes; columns: predicted classes.
+                          </p>
+                          <div style={{ overflowX: "auto" }}>
+                            <table style={{ borderCollapse: "collapse", minWidth: "100%", textAlign: "right" }}>
+                              <thead>
+                                <tr>
+                                  <th style={{ padding: "6px 8px", textAlign: "left" }}>Actual / predicted</th>
+                                  {evaluationSummary.confusionMatrixLabels.map((label) => (
+                                    <th key={label} style={{ padding: "6px 8px" }}>{label}</th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {evaluationSummary.confusionMatrix.map((row, rowIndex) => (
+                                  <tr key={evaluationSummary.confusionMatrixLabels[rowIndex]}>
+                                    <th scope="row" style={{ padding: "6px 8px", textAlign: "left" }}>
+                                      {evaluationSummary.confusionMatrixLabels[rowIndex]}
+                                    </th>
+                                    {row.map((count, columnIndex) => (
+                                      <td key={evaluationSummary.confusionMatrixLabels[columnIndex]} style={{ padding: "6px 8px" }}>
+                                        {count}
+                                      </td>
+                                    ))}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
+
+                      {evaluationSummary.perClassMetrics.length > 0 && (
+                        <div>
+                          <h3 style={{ margin: "0 0 8px", fontSize: "15px", fontWeight: 600 }}>
+                            Per-class metrics
+                          </h3>
+                          <div style={{ overflowX: "auto" }}>
+                            <table style={{ borderCollapse: "collapse", minWidth: "100%", textAlign: "right" }}>
+                              <thead>
+                                <tr>
+                                  <th style={{ padding: "6px 8px", textAlign: "left" }}>Class</th>
+                                  <th style={{ padding: "6px 8px" }}>Precision</th>
+                                  <th style={{ padding: "6px 8px" }}>Recall</th>
+                                  <th style={{ padding: "6px 8px" }}>F1</th>
+                                  <th style={{ padding: "6px 8px" }}>Support</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {evaluationSummary.perClassMetrics.map((item) => (
+                                  <tr key={item.label}>
+                                    <th scope="row" style={{ padding: "6px 8px", textAlign: "left" }}>{item.label}</th>
+                                    <td style={{ padding: "6px 8px" }}>{formatPredictionMetric({ value: item.precision, format: "percentage" })}</td>
+                                    <td style={{ padding: "6px 8px" }}>{formatPredictionMetric({ value: item.recall, format: "percentage" })}</td>
+                                    <td style={{ padding: "6px 8px" }}>{formatPredictionMetric({ value: item.f1_score, format: "percentage" })}</td>
+                                    <td style={{ padding: "6px 8px" }}>{item.support ?? "Not available"}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
+              );
+            })()}
+          </section>
+        )}
+
+        {trainingState === "success" && trainingResult && (
+          <section
             aria-label="Prediction"
             style={{ ...panelStyle, marginTop: "20px", padding: "28px" }}
           >
@@ -801,10 +1143,16 @@ export default function App() {
                 Next step
               </p>
               <h2 style={{ margin: 0, fontSize: "22px", fontWeight: 500 }}>
-                Make a prediction
+                {predictionConfig.problemType === "classification"
+                  ? "Predict a class"
+                  : predictionConfig.problemType === "regression"
+                    ? "Predict a value"
+                    : predictionConfig.problemType === "clustering"
+                      ? "Assign a cluster"
+                      : "Make a prediction"}
               </h2>
               <div style={{ display: "flex", gap: "8px", marginTop: "16px", flexWrap: "wrap" }}>
-                {[{ value: "sample", label: "Predict Sample" }, { value: "new", label: "New Customer" }].map((option) => (
+                {[{ value: "sample", label: "Use first row" }, { value: "new", label: "Enter values" }].map((option) => (
                   <button
                     key={option.value}
                     type="button"
@@ -832,7 +1180,7 @@ export default function App() {
               <p style={{ margin: "10px 0 0", color: "#66756b", font: "14px/1.5 Arial, sans-serif" }}>
                 {predictionMode === "sample"
                   ? "Use the first row from the uploaded dataset."
-                  : "All fields are optional."}
+                  : `${predictionConfig.problemType === "clustering" ? "Clustering" : "Model"} feature values are optional.`}
               </p>
             </div>
 
@@ -916,11 +1264,19 @@ export default function App() {
                       font: "14px/1.5 Arial, sans-serif",
                     }}
                   >
-                    <span style={{ color: "#66756b", fontSize: "12px" }}>Prediction</span>
+                      <span style={{ color: "#66756b", fontSize: "12px" }}>
+                        {predictionConfig.problemType === "classification"
+                          ? "Predicted class"
+                          : predictionConfig.problemType === "regression"
+                            ? "Predicted value"
+                            : "Cluster ID"}
+                      </span>
                     <div style={{ marginTop: "4px", fontSize: "28px", fontWeight: 600, color: "#1e6041" }}>
-                      {String(predictionResult.prediction_labels?.[0] ?? predictionResult.predictions?.[0] ?? "-")}
+                        {predictionConfig.problemType === "classification"
+                          ? String(predictionResult.prediction_labels?.[0] ?? predictionResult.predictions?.[0] ?? "-")
+                          : String(predictionResult.predictions?.[0] ?? "-")}
                     </div>
-                    {predictionResult.probabilities?.[0] && (
+                      {predictionConfig.problemType === "classification" && predictionResult.probabilities?.[0] && (
                       <div style={{ marginTop: "10px", color: "#526158" }}>
                         Probabilities: {predictionResult.probabilities[0].map((value, index) => (
                           <span key={index} style={{ marginRight: "12px" }}>

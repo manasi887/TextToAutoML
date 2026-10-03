@@ -15,6 +15,25 @@ _WH_QUESTION_START = re.compile(
     re.IGNORECASE,
 )
 _ACTION_ONLY_ENDING = re.compile(r"\b(?:predict|estimate|forecast|classify|identify|determine)$", re.IGNORECASE)
+_COLUMN_TOKEN = r"[`'\"]?([\w][\w.-]*)[`'\"]?"
+_EXPLICIT_TARGET_PATTERNS = (
+    re.compile(
+        rf"\bwith\s+(?:the\s+)?{_COLUMN_TOKEN}\s+as\s+(?:the\s+)?target(?:\s+column)?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:use|select|choose|set)\s+(?:the\s+)?{_COLUMN_TOKEN}\s+as\s+(?:the\s+)?target(?:\s+column)?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:target|label)(?:\s+(?:column|field))?\s*(?:is|:|=)\s*{_COLUMN_TOKEN}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:in|from)\s+(?:the\s+)?{_COLUMN_TOKEN}\s+column\b",
+        re.IGNORECASE,
+    ),
+)
 
 
 def extract_target_reference(text: str) -> dict[str, Any]:
@@ -25,6 +44,16 @@ def extract_target_reference(text: str) -> dict[str, Any]:
         raise ValueError("text must be a non-empty string")
 
     request = text.strip().strip(".!?").strip()
+    for pattern in _EXPLICIT_TARGET_PATTERNS:
+        match = pattern.search(request)
+        if match is not None:
+            return {
+                "target_reference": match.group(1).lower(),
+                "target_found": True,
+                "needs_clarification": False,
+                "explicit_target_column": True,
+            }
+
     match = re.match(rf"^(?:{_TARGET_VERBS})\s+(.+)$", request, re.IGNORECASE)
     if match is not None:
         # Keep the phrase after the action verb and remove dataset context.

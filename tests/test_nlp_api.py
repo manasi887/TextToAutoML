@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from main import app
+from services.automl.trainer import split_dataset_train_validation_test
 
 
 class NlpApiTests(unittest.TestCase):
@@ -103,6 +104,125 @@ class NlpApiTests(unittest.TestCase):
         self.assertEqual(analysis_response.status_code, 200)
         self.assertEqual(analysis_response.json(), nlp_result)
         process_mock.assert_called_once()
+
+    def test_proxy_diagnostic_uses_only_training_rows_and_returns_warnings(self):
+        dataset_name = "nlp_proxy_diagnostic.csv"
+        dataframe = pd.DataFrame(
+            [
+                {
+                    "group": f"g-{group_index}",
+                    "feature": row_index,
+                    "target": row_index % 2,
+                    "target_copy": row_index % 2,
+                }
+                for group_index in range(12)
+                for row_index in range(8)
+            ]
+        )
+        self._write_dataset(dataset_name, dataframe)
+        nlp_result = {
+            "ready_for_training": True,
+            "needs_clarification": False,
+            "dataset_resolution": {
+                "target_column": "target",
+                "problem_type": "Binary Classification",
+            },
+        }
+        captured = {}
+        warning = {
+            "feature": "target_copy",
+            "detection_type": "exact_target_copy",
+            "evidence": {"rows_checked": 0},
+            "message": "Review feature provenance and prediction-time availability.",
+        }
+        split_partitions = {}
+
+        def capture_diagnostic(training_df, target_column, group_column=None):
+            captured["training_df"] = training_df.copy()
+            captured["target_column"] = target_column
+            captured["group_column"] = group_column
+            return {"target_column": target_column, "warnings": [warning]}
+
+        def capture_split(*args, **kwargs):
+            partitions = split_dataset_train_validation_test(*args, **kwargs)
+            split_partitions["partitions"] = partitions
+            split_partitions["kwargs"] = kwargs
+            return partitions
+
+        with patch("api.nlp.process_nlp_request", return_value=nlp_result), patch(
+            "api.nlp.diagnose_target_proxy_features",
+            side_effect=capture_diagnostic,
+        ) as diagnostic_mock, patch(
+            "api.nlp.split_dataset_train_validation_test",
+            side_effect=capture_split,
+        ) as split_mock:
+            response = self.client.post(
+                "/nlp/diagnose-target-proxies",
+                json={
+                    "filename": dataset_name,
+                    "text": "Classify target",
+                    "group_column": "group",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["warnings"], [warning])
+        self.assertEqual(body["training_rows_checked"], len(captured["training_df"]))
+        self.assertEqual(captured["target_column"], "target")
+        self.assertEqual(captured["group_column"], "group")
+        self.assertEqual(split_partitions["kwargs"]["group_column"], "group")
+
+        train_df, validation_df, test_df = split_partitions["partitions"]
+        self.assertTrue(captured["training_df"].equals(train_df))
+        self.assertLess(len(train_df), len(dataframe))
+        group_sets = [set(partition["group"]) for partition in (train_df, validation_df, test_df)]
+        self.assertTrue(group_sets[0].isdisjoint(group_sets[1]))
+        self.assertTrue(group_sets[0].isdisjoint(group_sets[2]))
+        self.assertTrue(group_sets[1].isdisjoint(group_sets[2]))
+        diagnostic_mock.assert_called_once()
+
+    def test_proxy_diagnostic_skips_clustering_and_unresolved_requests(self):
+        dataset_name = "nlp_proxy_diagnostic_invalid.csv"
+        self._write_dataset(dataset_name, {"target": [0, 1], "feature": [1, 2]})
+        nlp_results = [
+            {
+                "ready_for_training": True,
+                "dataset_resolution": {
+                    "target_column": None,
+                    "problem_type": "Clustering",
+                },
+            },
+            {
+                "ready_for_training": False,
+                "needs_clarification": True,
+                "dataset_resolution": {
+                    "target_column": None,
+                    "problem_type": "Classification",
+                },
+            },
+        ]
+
+        with patch("api.nlp.process_nlp_request", side_effect=nlp_results), patch(
+            "api.nlp.diagnose_target_proxy_features"
+        ) as diagnostic_mock, patch(
+            "api.nlp.split_dataset_train_validation_test"
+        ) as split_mock:
+            responses = [
+                self.client.post(
+                    "/nlp/diagnose-target-proxies",
+                    json={"filename": dataset_name, "text": "Analyze this dataset"},
+                )
+                for _ in nlp_results
+            ]
+
+        self.assertEqual([response.status_code for response in responses], [400, 400])
+        self.assertEqual(
+            [response.json()["detail"]["code"] for response in responses],
+            ["unsupported_diagnostic_task", "clarification_required"],
+        )
+        diagnostic_mock.assert_not_called()
+        split_mock.assert_not_called()
 
     def test_nlp_train_missing_dataset_returns_404(self):
         response = self.client.post(

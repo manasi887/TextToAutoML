@@ -457,6 +457,7 @@ def match_target_column(
     df: pd.DataFrame,
     *,
     candidate_columns: list[str] | None = None,
+    require_exact_match: bool = False,
 ) -> dict[str, Any]:
     """Match a natural-language target reference to a DataFrame column."""
     if not isinstance(target_reference, str):
@@ -479,6 +480,12 @@ def match_target_column(
         column for column in df.columns
         if allowed_columns is None or str(column) in allowed_columns
     ]
+    if require_exact_match:
+        columns_to_match = [
+            column
+            for column in columns_to_match
+            if _normalize(column) == normalized_target
+        ]
     if not columns_to_match:
         return _build_result(
             target_reference,

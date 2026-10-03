@@ -174,6 +174,7 @@ def resolve_dataset_context(
             not target_is_clear
             or target_result.get("match_type") == "hybrid"
         )
+        and not target_result.get("explicit_target_column", False)
     )
     if (
         should_refine_explicit_target
