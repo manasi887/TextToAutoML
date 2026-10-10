@@ -38,6 +38,9 @@ def integrate_nlp_with_automl(
     nlp_result: dict[str, Any],
     dataset_name: str | None = None,
     group_column: str | None = None,
+    feature_columns: list[str] | None = None,
+    tuning_strategy: str = "grid",
+    tuning_trials: int = 8,
 ) -> dict[str, Any]:
     """Run AutoML only when NLP resolution confirms training readiness."""
     if not isinstance(df, pd.DataFrame):
@@ -88,6 +91,11 @@ def integrate_nlp_with_automl(
     }
     if group_column is not None:
         pipeline_options["group_column"] = group_column
+    if feature_columns is not None:
+        pipeline_options["feature_columns"] = feature_columns
+    if tuning_strategy != "grid":
+        pipeline_options["tuning_strategy"] = tuning_strategy
+        pipeline_options["tuning_trials"] = tuning_trials
     training_output = run_automl_pipeline(
         df,
         target_column,

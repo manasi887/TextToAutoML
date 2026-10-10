@@ -1,6 +1,7 @@
 """Inference utilities for the trained user-intent classifier."""
 
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,34 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _tokenizer: Any = None
 _model: Any = None
 _label_mapping: dict[str, str] | None = None
+_temperature: float | None = None
+
+
+def _load_temperature() -> float:
+	"""Return the persisted calibration temperature or the neutral default."""
+	global _temperature
+	if _temperature is not None:
+		return _temperature
+
+	temperature_path = MODEL_DIR / "temperature.json"
+	if not temperature_path.is_file():
+		_temperature = 1.0
+		return _temperature
+
+	try:
+		payload = json.loads(temperature_path.read_text(encoding="utf-8"))
+		if not isinstance(payload, dict):
+			raise ValueError("temperature artifact must contain a JSON object")
+		value = payload.get("temperature", payload.get("value", 1.0))
+		if isinstance(value, bool):
+			raise ValueError("temperature must be numeric")
+		temperature = float(value)
+	except (OSError, json.JSONDecodeError, TypeError, ValueError):
+		temperature = 1.0
+	if not math.isfinite(temperature) or temperature <= 0:
+		temperature = 1.0
+	_temperature = temperature
+	return _temperature
 
 
 def _load_artifacts() -> tuple[Any, Any, dict[str, str]]:
@@ -57,6 +86,7 @@ def _load_artifacts() -> tuple[Any, Any, dict[str, str]]:
 
 	_model.to(DEVICE)
 	_model.eval()
+	_load_temperature()
 	return _tokenizer, _model, _label_mapping
 
 
@@ -71,7 +101,8 @@ def detect_user_intent(text: str) -> dict[str, Any]:
 
 	with torch.no_grad():
 		logits = model(**inputs).logits
-		probabilities = torch.softmax(logits, dim=-1)
+		temperature = _load_temperature()
+		probabilities = torch.softmax(logits / temperature, dim=-1)
 
 	class_id = int(torch.argmax(probabilities, dim=-1).item())
 	intent = label_mapping.get(str(class_id))

@@ -8,11 +8,16 @@ import numpy as np
 from sklearn.datasets import make_classification, make_regression
 from sklearn.dummy import DummyRegressor
 from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 import services.automl.persistence as persistence
-from services.automl.pipeline import run_automl_pipeline
+import services.automl.pipeline as automl_pipeline
+from services.automl.pipeline import (
+    _build_validation_diagnostics,
+    run_automl_pipeline,
+)
 from services.automl.persistence import load_model_package
 from services.automl.predictor import predict_with_model
 from services.automl.trainer import (
@@ -323,6 +328,210 @@ def test_majority_only_classifier_reports_minority_performance_and_confusion_mat
     assert metrics["per_class_metrics"]["1"]["recall"] == 0.0
 
 
+def test_balanced_classification_keeps_weighted_f1_selection():
+    selection = select_best_model(
+        [
+            {
+                "model_name": "WeightedWinner",
+                "model": object(),
+                "metrics": {"f1_score": 0.90, "balanced_accuracy": 0.70},
+            },
+            {
+                "model_name": "BalancedWinner",
+                "model": object(),
+                "metrics": {"f1_score": 0.82, "balanced_accuracy": 0.95},
+            },
+        ],
+        "Binary Classification",
+        training_target=pd.Series([0] * 60 + [1] * 40),
+    )
+
+    assert selection["selection_metric"] == "f1_score"
+    assert selection["best_model_name"] == "WeightedWinner"
+
+
+def test_imbalanced_classification_uses_balanced_accuracy_and_rejects_majority_only_winner():
+    selection = select_best_model(
+        [
+            {
+                "model_name": "MajorityOnly",
+                "model": object(),
+                "metrics": {"f1_score": 0.8526, "balanced_accuracy": 0.50},
+            },
+            {
+                "model_name": "MinorityAware",
+                "model": object(),
+                "metrics": {"f1_score": 0.80, "balanced_accuracy": 0.85},
+            },
+        ],
+        "Binary Classification",
+        training_target=pd.Series([0] * 80 + [1] * 40),
+    )
+
+    assert selection["selection_metric"] == "balanced_accuracy"
+    assert selection["best_model_name"] == "MinorityAware"
+
+
+def test_imbalanced_selection_ignores_missing_and_non_finite_metrics():
+    selection = select_best_model(
+        [
+            {
+                "model_name": "MissingMetric",
+                "model": object(),
+                "metrics": {"f1_score": 0.99},
+            },
+            {
+                "model_name": "NonFiniteMetric",
+                "model": object(),
+                "metrics": {"balanced_accuracy": float("nan")},
+            },
+            {
+                "model_name": "ValidMetric",
+                "model": object(),
+                "metrics": {"balanced_accuracy": 0.65},
+            },
+        ],
+        "Multi-class Classification",
+        training_target=pd.Series(["common"] * 90 + ["rare"] * 10),
+    )
+
+    assert selection["selection_metric"] == "balanced_accuracy"
+    assert selection["best_model_name"] == "ValidMetric"
+
+    failed = select_best_model(
+        [{"model_name": "NoValidMetric", "model": object(), "metrics": {"balanced_accuracy": None}}],
+        "Binary Classification",
+        training_target=pd.Series([0] * 90 + [1] * 10),
+    )
+    assert failed["status"] == "Failed"
+    assert failed["selection_metric"] == "balanced_accuracy"
+
+
+def test_equal_selection_scores_break_ties_by_model_name():
+    selection = select_best_model(
+        [
+            {"model_name": "Zeta", "model": object(), "metrics": {"balanced_accuracy": 0.75}},
+            {"model_name": "Alpha", "model": object(), "metrics": {"balanced_accuracy": 0.75}},
+        ],
+        "Binary Classification",
+        training_target=pd.Series([0] * 80 + [1] * 20),
+    )
+
+    assert selection["best_model_name"] == "Alpha"
+
+
+def test_pipeline_imbalance_detection_uses_training_partition_target_only(monkeypatch):
+    training_partition = pd.DataFrame(
+        {"feature": range(100), "target": [0] * 80 + [1] * 20}
+    )
+    validation_partition = pd.DataFrame(
+        {"feature": range(100, 120), "target": [0] * 10 + [1] * 10}
+    )
+    holdout_partition = pd.DataFrame(
+        {"feature": range(120, 140), "target": [0] * 2 + [1] * 18}
+    )
+    dataframe = pd.concat(
+        [training_partition, validation_partition, holdout_partition],
+        ignore_index=True,
+    )
+    captured = {}
+
+    class SelectionReached(Exception):
+        pass
+
+    def capture_selection(results, problem_type, *, training_target=None):
+        captured["problem_type"] = problem_type
+        captured["training_target"] = training_target.copy()
+        raise SelectionReached
+
+    monkeypatch.setattr(
+        automl_pipeline,
+        "split_dataset_train_validation_test",
+        lambda *args, **kwargs: (
+            training_partition,
+            validation_partition,
+            holdout_partition,
+        ),
+    )
+    monkeypatch.setattr(
+        automl_pipeline,
+        "_prepare_training_features",
+        lambda train_df, *args, **kwargs: {
+            "X": train_df[["feature"]].reset_index(drop=True),
+            "y": train_df["target"].reset_index(drop=True),
+            "feature_names": ["feature"],
+            "encoders": {},
+            "preprocessing": {"raw_feature_names": ["feature"]},
+        },
+    )
+    monkeypatch.setattr(
+        automl_pipeline,
+        "train_models",
+        lambda *args, **kwargs: {
+            "trained_models": {"DecisionTreeClassifier": DecisionTreeClassifier()},
+            "training_errors": [],
+        },
+    )
+    monkeypatch.setattr(
+        automl_pipeline,
+        "tune_selected_model",
+        lambda model_name, model, *args, **kwargs: {
+            "model": model,
+            "status": "Skipped",
+            "errors": [],
+        },
+    )
+    monkeypatch.setattr(
+        automl_pipeline,
+        "evaluate_models",
+        lambda *args, **kwargs: {
+            "results": [{
+                "model_name": "DecisionTreeClassifier",
+                "model": DecisionTreeClassifier(),
+                "metrics": {"f1_score": 0.8, "balanced_accuracy": 0.7},
+            }],
+            "errors": [],
+        },
+    )
+    monkeypatch.setattr(automl_pipeline, "extract_meta_features", lambda *args, **kwargs: {})
+    monkeypatch.setattr(automl_pipeline, "select_best_model", capture_selection)
+
+    with pytest.raises(SelectionReached):
+        run_automl_pipeline(
+            dataframe,
+            target_column="target",
+            problem_type="Binary Classification",
+        )
+
+    assert captured["problem_type"] == "Binary Classification"
+    assert captured["training_target"].value_counts().to_dict() == {0: 80, 1: 20}
+    assert not captured["training_target"].equals(holdout_partition["target"])
+
+
+def test_regression_and_clustering_selection_ignore_classification_policy():
+    regression = select_best_model(
+        [
+            {"model_name": "HighRMSE", "model": object(), "metrics": {"rmse": 2.0}},
+            {"model_name": "LowRMSE", "model": object(), "metrics": {"rmse": 1.0}},
+        ],
+        "Regression",
+        training_target=pd.Series([0] * 90 + [1] * 10),
+    )
+    clustering = select_best_model(
+        [
+            {"model_name": "LowSilhouette", "model": object(), "metrics": {"silhouette_score": 0.2}},
+            {"model_name": "HighSilhouette", "model": object(), "metrics": {"silhouette_score": 0.8}},
+        ],
+        "Clustering",
+        training_target=pd.Series([0] * 90 + [1] * 10),
+    )
+
+    assert regression["selection_metric"] == "rmse"
+    assert regression["best_model_name"] == "LowRMSE"
+    assert clustering["selection_metric"] == "silhouette_score"
+    assert clustering["best_model_name"] == "HighSilhouette"
+
+
 def test_regression_tuning_uses_reproducible_training_cv():
     X, y = make_regression(n_samples=72, n_features=4, noise=4.0, random_state=17)
     features = pd.DataFrame(X, columns=[f"feature_{index}" for index in range(X.shape[1])])
@@ -433,6 +642,41 @@ def test_pipeline_reports_exact_duplicate_rows_removed(tmp_path, monkeypatch):
     )
 
 
+def test_selected_features_define_persisted_and_prediction_schema(tmp_path, monkeypatch):
+    dataframe = pd.DataFrame(
+        [
+            {
+                "group": f"g-{group_index}",
+                "selected_category": ["a", "b", "c", "d"][row_index % 4],
+                "unselected_feature": group_index * 100 + row_index,
+                "target": row_index % 2,
+            }
+            for group_index in range(20)
+            for row_index in range(8)
+        ]
+    )
+    monkeypatch.setattr(persistence, "DEFAULT_STORAGE_DIR", tmp_path / "models")
+
+    result = run_automl_pipeline(
+        dataframe,
+        target_column="target",
+        problem_type="Binary Classification",
+        group_column="group",
+        feature_columns=["selected_category", "target", "group"],
+    )
+
+    assert result["status"] == "success"
+    assert result["preprocessing"]["raw_feature_names"] == ["selected_category"]
+    package = load_model_package(result["model"]["model_id"])
+    assert package["preprocessing"]["raw_feature_names"] == ["selected_category"]
+    prediction = predict_with_model(
+        package,
+        [{"selected_category": "a", "unselected_feature": 9999}],
+    )
+    assert prediction["status"] == "success"
+    assert prediction["prediction_count"] == 1
+
+
 def test_regression_holdout_evaluation_is_reproducible():
     X, y = make_regression(n_samples=80, n_features=4, noise=5.0, random_state=12)
     features = pd.DataFrame(X, columns=[f"feature_{index}" for index in range(X.shape[1])])
@@ -502,6 +746,95 @@ def test_tuning_fits_preprocessing_only_on_each_training_fold(monkeypatch):
     assert all(keys <= all_row_keys for keys in fitted_row_keys)
 
 
+def test_bayesian_tuning_receives_only_outer_training_rows(monkeypatch, tmp_path):
+    dataframe = _build_binary_dataset()
+    dataframe["row_marker"] = [f"row-{index}" for index in range(len(dataframe))]
+    expected_train, expected_validation, expected_test = split_dataset_train_validation_test(
+        dataframe,
+        "target",
+        problem_type="Binary Classification",
+        random_state=42,
+    )
+    captured = []
+
+    def capture_tuning(model_name, model, X_train, y_train, problem_type, **kwargs):
+        captured.append({"raw_training_df": kwargs["raw_training_df"].copy(), "kwargs": kwargs})
+        return {
+            "model": model,
+            "status": "Fallback",
+            "strategy": kwargs.get("tuning_strategy", "grid"),
+            "errors": [],
+        }
+
+    monkeypatch.setattr(persistence, "DEFAULT_STORAGE_DIR", tmp_path / "models")
+    monkeypatch.setattr("services.automl.pipeline.tune_selected_model", capture_tuning)
+    result = run_automl_pipeline(
+        dataframe,
+        target_column="target",
+        problem_type="Binary Classification",
+        tuning_strategy="bayesian",
+        tuning_trials=2,
+    )
+
+    assert result["status"] == "success"
+    assert result["tuning"]["strategy"] == "bayesian"
+    assert result["tuning"]["trials_per_model"] == 2
+    assert len(captured) == 3
+    training_markers = set(expected_train["row_marker"])
+    validation_markers = set(expected_validation["row_marker"])
+    test_markers = set(expected_test["row_marker"])
+    for entry in captured:
+        received_markers = set(entry["raw_training_df"]["row_marker"])
+        assert received_markers == training_markers
+        assert received_markers.isdisjoint(validation_markers)
+        assert received_markers.isdisjoint(test_markers)
+        assert entry["kwargs"]["tuning_strategy"] == "bayesian"
+        assert entry["kwargs"]["n_trials"] == 2
+
+
+def test_auto_policy_uses_only_outer_training_metadata_and_none_keeps_baseline(tmp_path, monkeypatch):
+    dataframe = _build_binary_dataset()
+    dataframe["row_marker"] = [f"row-{index}" for index in range(len(dataframe))]
+    expected_train, _, _ = split_dataset_train_validation_test(
+        dataframe,
+        "target",
+        problem_type="Binary Classification",
+        random_state=42,
+    )
+    import services.automl.pipeline as pipeline_module
+
+    original_policy = pipeline_module.select_auto_optimizer
+    policy_inputs = {}
+
+    def capture_policy(**kwargs):
+        policy_inputs.update(kwargs)
+        return original_policy(**kwargs)
+
+    monkeypatch.setattr(persistence, "DEFAULT_STORAGE_DIR", tmp_path / "models")
+    monkeypatch.setattr(pipeline_module, "select_auto_optimizer", capture_policy)
+    result = run_automl_pipeline(
+        dataframe,
+        target_column="target",
+        problem_type="Binary Classification",
+        tuning_strategy="auto",
+        tuning_trials=6,
+    )
+
+    assert result["status"] == "success"
+    assert policy_inputs["training_rows"] == len(expected_train)
+    assert policy_inputs["candidate_models"] == result["models"]["trained"]
+    assert "validation_rows" not in policy_inputs
+    assert "test_rows" not in policy_inputs
+    assert result["tuning"]["requested_mode"] == "auto"
+    assert result["tuning"]["selected_strategy"] == "none"
+    assert result["tuning"]["trial_budget"] == 0
+    assert result["tuning"]["reason"]
+    assert all(
+        model_result["strategy"] == "none"
+        for model_result in result["tuning"]["models"].values()
+    )
+
+
 def test_binary_classification_pipeline_success():
     df = _build_binary_dataset()
 
@@ -560,6 +893,232 @@ def test_all_model_failure_returns_controlled_failure(monkeypatch):
     assert result["status"] == "failed"
     assert "All candidate models failed" in result["error"]
     assert result["models"]["trained"] == []
+    assert result["validation_diagnostics"][0]["candidate_name"] == "synthetic"
+    assert result["validation_diagnostics"][0]["status"] == "training_failed"
+
+
+def test_validation_diagnostics_cover_candidates_failures_and_missing_metrics():
+    diagnostics = _build_validation_diagnostics(
+        ["LogisticRegression", "DecisionTreeClassifier", "MissingMetricCandidate"],
+        [{"model_name": "RandomForestClassifier", "error": "cannot read C:\\Users\\private\\data.csv\ntraceback"}],
+        {
+            "LogisticRegression": {"status": "Skipped", "errors": []},
+            "DecisionTreeClassifier": {
+                "status": "Failed",
+                "errors": [{"error": "fit failed at C:\\Users\\private\\model.pkl\ntraceback"}],
+            },
+        },
+        [
+            {
+                "model_name": "LogisticRegression",
+                "metrics": {
+                    "balanced_accuracy": 0.75,
+                    "f1_score": 0.8,
+                    "macro_f1_score": 0.7,
+                    "confusion_matrix": [[8, 2], [1, 3]],
+                    "confusion_matrix_labels": ["0", "1"],
+                    "per_class_metrics": {
+                        "0": {"recall": 0.8, "support": 10},
+                        "1": {"recall": 0.75, "support": 4},
+                    },
+                },
+            },
+            {
+                "model_name": "DecisionTreeClassifier",
+                "metrics": {"balanced_accuracy": 0.55, "f1_score": 0.6},
+            },
+            {"model_name": "MissingMetricCandidate", "metrics": {}},
+        ],
+        [],
+        "balanced_accuracy",
+        [
+            {
+                "model_name": "LogisticRegression",
+                "metrics": {"f1_score": 0.92, "balanced_accuracy": 0.9},
+            },
+            {
+                "model_name": "DecisionTreeClassifier",
+                "metrics": {"f1_score": 0.88, "balanced_accuracy": 0.86},
+            },
+        ],
+        [{
+            "model_name": "MissingMetricCandidate",
+            "error": "training metric failed at C:\\private\\train.csv\ntraceback",
+        }],
+    )
+
+    by_name = {item["candidate_name"]: item for item in diagnostics}
+    assert by_name["LogisticRegression"]["status"] == "evaluated"
+    assert by_name["LogisticRegression"]["selection_value"] == 0.75
+    assert by_name["LogisticRegression"]["weighted_f1"] == 0.8
+    assert by_name["LogisticRegression"]["macro_f1"] == 0.7
+    assert by_name["LogisticRegression"]["confusion_matrix"] == [[8, 2], [1, 3]]
+    assert by_name["LogisticRegression"]["training_metrics"]["balanced_accuracy"] == 0.9
+    assert by_name["LogisticRegression"]["validation_metrics"]["balanced_accuracy"] == 0.75
+    assert by_name["LogisticRegression"]["per_class_metrics"]["1"] == {
+        "recall": 0.75,
+        "support": 4,
+    }
+    assert by_name["DecisionTreeClassifier"]["status"] == "evaluated_with_tuning_fallback"
+    assert by_name["DecisionTreeClassifier"]["selection_value"] == 0.55
+    assert "C:\\Users" not in by_name["DecisionTreeClassifier"]["error_reason"]
+    assert "traceback" not in by_name["DecisionTreeClassifier"]["error_reason"]
+    assert by_name["MissingMetricCandidate"]["status"] == "missing_metrics"
+    assert by_name["MissingMetricCandidate"]["selection_value"] is None
+    assert by_name["MissingMetricCandidate"]["training_metrics"] is None
+    assert "C:\\private" not in by_name["MissingMetricCandidate"]["training_metrics_error"]
+    assert "traceback" not in by_name["MissingMetricCandidate"]["training_metrics_error"]
+    assert by_name["RandomForestClassifier"]["status"] == "training_failed"
+    assert "C:\\Users" not in by_name["RandomForestClassifier"]["error_reason"]
+    assert "traceback" not in by_name["RandomForestClassifier"]["error_reason"]
+
+
+def test_candidate_validation_diagnostics_use_validation_not_holdout(monkeypatch):
+    train = pd.DataFrame({"signal": range(40), "target": [0] * 30 + [1] * 10})
+    validation = pd.DataFrame({"signal": range(100, 120), "target": [0, 1] * 10})
+    holdout = pd.DataFrame({"signal": range(200, 220), "target": [0, 1] * 10})
+    dataframe = pd.concat([train, validation, holdout], ignore_index=True)
+    candidates = {
+        "LogisticRegression": LogisticRegression(),
+        "DecisionTreeClassifier": DecisionTreeClassifier(random_state=42),
+        "RandomForestClassifier": DecisionTreeClassifier(random_state=7),
+    }
+    monkeypatch.setattr(
+        automl_pipeline,
+        "split_dataset_train_validation_test",
+        lambda *args, **kwargs: (train.copy(), validation.copy(), holdout.copy()),
+    )
+    monkeypatch.setattr(
+        automl_pipeline,
+        "train_models",
+        lambda *args, **kwargs: {
+            "trained_models": candidates,
+            "model_names": list(candidates),
+            "training_errors": [],
+        },
+    )
+    monkeypatch.setattr(
+        automl_pipeline,
+        "tune_selected_model",
+        lambda name, model, *args, **kwargs: (
+            {
+                "model": DecisionTreeClassifier(max_depth=1, random_state=42),
+                "status": "Completed",
+                "metrics": {"f1_score": 0.6},
+                "errors": [],
+            }
+            if name == "DecisionTreeClassifier"
+            else {"model": model, "status": "Skipped", "errors": []}
+        ),
+    )
+    evaluation_calls = []
+    evaluation_models = []
+    evaluation_targets = []
+
+    def evaluate_with_partition_marker(models, features, labels, problem_type):
+        evaluation_calls.append(features["signal"].tolist())
+        evaluation_models.append(dict(models))
+        evaluation_targets.append(labels.tolist())
+        if len(models) > 1:
+            is_training_partition = features["signal"].iloc[0] < 100
+            if is_training_partition:
+                score = 0.95
+                f1_value = 0.96
+            else:
+                score = 0.8
+                f1_value = 0.7
+            return {
+                "status": "Completed",
+                "errors": ([{
+                    "model_name": "RandomForestClassifier",
+                    "error": "training score unavailable",
+                }] if is_training_partition else []),
+                "results": [
+                    {
+                        "model_name": name,
+                        "model": model,
+                        "metrics": {
+                            "f1_score": f1_value if name == "DecisionTreeClassifier" else f1_value - 0.1,
+                            "balanced_accuracy": score if name == "DecisionTreeClassifier" else score - 0.2,
+                            "macro_f1_score": f1_value - 0.05,
+                            "confusion_matrix": [[7, 3], [2, 8]],
+                            "confusion_matrix_labels": ["0", "1"],
+                            "per_class_metrics": {
+                                "0": {"recall": 0.7, "support": 10},
+                                "1": {"recall": 0.8, "support": 10},
+                            },
+                        },
+                    }
+                    for name, model in models.items()
+                    if not (is_training_partition and name == "RandomForestClassifier")
+                ],
+            }
+        name, model = next(iter(models.items()))
+        return {
+            "status": "Completed",
+            "errors": [],
+            "results": [{
+                "model_name": name,
+                "model": model,
+                "metrics": {
+                    "f1_score": 0.123,
+                    "balanced_accuracy": 0.111,
+                    "macro_f1_score": 0.1,
+                    "confusion_matrix": [[20, 0], [0, 0]],
+                    "confusion_matrix_labels": ["0", "1"],
+                    "per_class_metrics": {},
+                },
+            }],
+        }
+
+    monkeypatch.setattr(automl_pipeline, "evaluate_models", evaluate_with_partition_marker)
+    monkeypatch.setattr(automl_pipeline, "extract_meta_features", lambda *args, **kwargs: {})
+    monkeypatch.setattr(automl_pipeline, "load_cached_openml_records", lambda: [])
+    monkeypatch.setattr(
+        automl_pipeline,
+        "recommend_models",
+        lambda *args, **kwargs: {"status": "low_confidence", "recommendations": []},
+    )
+    monkeypatch.setattr(
+        automl_pipeline,
+        "save_model_package",
+        lambda **kwargs: {
+            "model_id": "test-model",
+            "model_name": kwargs["model_name"],
+            "problem_type": kwargs["problem_type"],
+            "target_column": kwargs["target_column"],
+            "selection_metric": kwargs["selection_metric"],
+            "metrics": kwargs["metrics"],
+        },
+    )
+
+    result = run_automl_pipeline(dataframe, "target", "Binary Classification")
+
+    assert evaluation_calls == [
+        train["signal"].tolist(),
+        validation["signal"].tolist(),
+        holdout["signal"].tolist(),
+    ]
+    assert evaluation_targets == [
+        train["target"].tolist(),
+        validation["target"].tolist(),
+        holdout["target"].tolist(),
+    ]
+    assert evaluation_models[0]["LogisticRegression"] is evaluation_models[1]["LogisticRegression"]
+    assert evaluation_models[0]["DecisionTreeClassifier"] is evaluation_models[1]["DecisionTreeClassifier"]
+    assert evaluation_models[1]["DecisionTreeClassifier"].max_depth == 1
+    diagnostics = {item["candidate_name"]: item for item in result["validation_diagnostics"]}
+    assert diagnostics["DecisionTreeClassifier"]["selection_value"] == 0.8
+    assert diagnostics["DecisionTreeClassifier"]["weighted_f1"] == 0.7
+    assert diagnostics["DecisionTreeClassifier"]["training_metrics"]["balanced_accuracy"] == 0.95
+    assert diagnostics["DecisionTreeClassifier"]["validation_metrics"]["balanced_accuracy"] == 0.8
+    assert diagnostics["RandomForestClassifier"]["training_metrics"] is None
+    assert diagnostics["RandomForestClassifier"]["training_metrics_error"] == "training score unavailable"
+    assert result["evaluation"]["results"][0]["metrics"]["balanced_accuracy"] == 0.111
+    assert all(
+        item["balanced_accuracy"] != 0.111
+        for item in result["validation_diagnostics"]
+    )
 
 
 def test_pipeline_passes_high_confidence_recommendation_to_supervised_training():

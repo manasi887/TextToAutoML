@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
@@ -37,6 +38,52 @@ from .trainer import (
     transform_training_features,
     transform_training_target,
 )
+from .optimizer import (
+    ensure_optuna_available,
+    optimize_with_optuna,
+    optimize_with_random_search,
+)
+
+
+_BAYESIAN_SEARCH_SPACES = {
+    "LogisticRegression": {
+        "C": {"kind": "float", "low": 1e-3, "high": 100.0, "log": True},
+    },
+    "DecisionTreeClassifier": {
+        "max_depth": {"kind": "categorical", "choices": [None, 3, 5, 10, 20, 30]},
+        "min_samples_split": {"kind": "int", "low": 2, "high": 20},
+        "min_samples_leaf": {"kind": "int", "low": 1, "high": 10},
+    },
+    "RandomForestClassifier": {
+        "n_estimators": {"kind": "int", "low": 50, "high": 300, "step": 25},
+        "max_depth": {"kind": "categorical", "choices": [None, 5, 10, 20, 30]},
+        "min_samples_split": {"kind": "int", "low": 2, "high": 20},
+        "min_samples_leaf": {"kind": "int", "low": 1, "high": 10},
+        "max_features": {"kind": "categorical", "choices": ["sqrt", "log2", None]},
+    },
+    "LinearRegression": {
+        "fit_intercept": {"kind": "categorical", "choices": [True, False]},
+    },
+    "DecisionTreeRegressor": {
+        "criterion": {
+            "kind": "categorical",
+            "choices": ["squared_error", "friedman_mse", "absolute_error"],
+        },
+        "max_depth": {"kind": "categorical", "choices": [None, 3, 5, 10, 20, 30]},
+        "min_samples_split": {"kind": "int", "low": 2, "high": 20},
+        "min_samples_leaf": {"kind": "int", "low": 1, "high": 10},
+    },
+    "RandomForestRegressor": {
+        "n_estimators": {"kind": "int", "low": 50, "high": 300, "step": 25},
+        "max_depth": {"kind": "categorical", "choices": [None, 5, 10, 20, 30]},
+        "min_samples_split": {"kind": "int", "low": 2, "high": 20},
+        "min_samples_leaf": {"kind": "int", "low": 1, "high": 10},
+        "max_features": {"kind": "categorical", "choices": [1.0, "sqrt", "log2"]},
+    },
+}
+
+CLASS_IMBALANCE_RATIO_THRESHOLD = 2.0
+"""Use balanced accuracy when the training largest/smallest class ratio is >= 2:1."""
 
 
 def _build_model_specs(
@@ -453,11 +500,26 @@ def tune_selected_model(
     target_column: str | None = None,
     preparation_function: Any | None = None,
     group_column: str | None = None,
+    tuning_strategy: str = "grid",
+    n_trials: int = 8,
+    random_state: int = 42,
 ) -> Dict[str, object]:
-    """Run a small CV-only search for the selected supervised model family."""
+    """Tune one estimator using the existing CV-only strategy or Optuna TPE."""
     normalized_type = (problem_type or "").strip().lower()
+    normalized_strategy = (tuning_strategy or "").strip().lower()
+    if normalized_strategy not in {"grid", "bayesian", "random", "none"}:
+        raise ValueError("tuning_strategy must be 'grid', 'bayesian', 'random', or 'none'.")
     if "clustering" in normalized_type:
         return {"model": model, "status": "Skipped", "errors": []}
+    if normalized_strategy == "none":
+        return {
+            "model": model,
+            "status": "Skipped",
+            "strategy": "none",
+            "errors": [],
+        }
+    if normalized_strategy == "bayesian":
+        ensure_optuna_available()
 
     search_spaces = {
         "LogisticRegression": {"C": [0.1, 1.0]},
@@ -523,6 +585,82 @@ def tune_selected_model(
                 if groups is not None
                 else KFold(n_splits=n_splits, shuffle=True, random_state=42)
             )
+
+    if normalized_strategy in {"bayesian", "random"}:
+        search_space = _BAYESIAN_SEARCH_SPACES.get(model_name)
+        if search_space is None:
+            return {
+                "model": model,
+                "status": "Skipped",
+                "strategy": normalized_strategy,
+                "errors": [{"model_name": model_name, "error": f"No {normalized_strategy} search space is defined for this estimator."}],
+            }
+
+        metric_name = "f1_score" if "classification" in normalized_type else "rmse"
+        direction = "maximize" if metric_name == "f1_score" else "minimize"
+        fold_metric_cache: dict[tuple[tuple[str, Any], ...], dict[str, float]] = {}
+
+        def evaluate_parameters(parameters: dict[str, Any]) -> float:
+            candidate = clone(model)
+            candidate.set_params(**parameters)
+            if "random_state" in candidate.get_params(deep=False):
+                candidate.set_params(random_state=random_state)
+            if cv_splitter is not None and raw_training_df is not None and target_column is not None:
+                evaluation = _evaluate_model_cv_with_preprocessing(
+                    model_name,
+                    candidate,
+                    raw_training_df,
+                    target_column,
+                    problem_type,
+                    cv_splitter,
+                    preparation_function or prepare_training_data,
+                    group_column=group_column,
+                )
+            else:
+                evaluation = evaluate_models_cv(
+                    {model_name: candidate}, X_train, y_train, problem_type
+                )
+            results = evaluation.get("results", [])
+            if not results:
+                details = evaluation.get("errors", [])
+                raise ValueError(
+                    f"Bayesian CV evaluation failed for {model_name}: {details}"
+                )
+            metrics = results[0]["metrics"]
+            cache_key = tuple(sorted(parameters.items()))
+            fold_metric_cache[cache_key] = metrics
+            return float(metrics[metric_name])
+
+        optimizer = (
+            optimize_with_optuna
+            if normalized_strategy == "bayesian"
+            else optimize_with_random_search
+        )
+        optimization = optimizer(
+            model,
+            search_space,
+            evaluate_parameters,
+            direction=direction,
+            n_trials=n_trials,
+            random_state=random_state,
+        )
+        best_parameters = {
+            name: value
+            for name, value in optimization["parameters"].items()
+            if name != "random_state"
+        }
+        best_metrics = fold_metric_cache.get(tuple(sorted(best_parameters.items())))
+        if best_metrics is None:
+            best_metrics = {metric_name: optimization["value"]}
+        return {
+            "model": optimization["model"],
+            "status": "Completed",
+            "strategy": normalized_strategy,
+            "errors": [],
+            "parameters": best_parameters,
+            "metrics": best_metrics,
+            "trials_run": optimization["trials_run"],
+        }
 
     try:
         for parameters in ParameterGrid(parameter_grid):
@@ -660,13 +798,17 @@ def _evaluate_model_cv_with_preprocessing(
 def select_best_model(
     evaluation_results: Dict[str, object] | List[Dict[str, Any]],
     problem_type: str,
+    *,
+    training_target: pd.Series | None = None,
 ) -> Dict[str, object]:
     """
     Select the best candidate using the task-specific primary metric.
 
     Regression: lowest RMSE.
     Clustering: highest silhouette score.
-    Classification: highest F1 score.
+    Classification: highest weighted F1 for balanced training classes, otherwise
+    highest balanced accuracy when the training largest/smallest class ratio is
+    at least ``CLASS_IMBALANCE_RATIO_THRESHOLD``.
     """
 
     normalized_type = (problem_type or "").strip().lower()
@@ -695,15 +837,38 @@ def select_best_model(
         selector = min
         reason = "lowest rmse"
     elif "classification" in normalized_type:
-        metric_name = "f1_score"
+        training_counts = (
+            training_target.dropna().value_counts()
+            if isinstance(training_target, pd.Series)
+            else pd.Series(dtype="int64")
+        )
+        if len(training_counts) >= 2:
+            imbalance_ratio = float(training_counts.max() / training_counts.min())
+        else:
+            imbalance_ratio = 1.0
+        metric_name = (
+            "balanced_accuracy"
+            if imbalance_ratio >= CLASS_IMBALANCE_RATIO_THRESHOLD
+            else "f1_score"
+        )
         selector = max
-        reason = "highest f1_score"
+        reason = f"highest {metric_name}"
     else:
         raise ValueError(f"Unsupported problem type for model selection: {problem_type}")
 
-    valid_results = [
-        item for item in candidate_results if isinstance(item, dict) and metric_name in item.get("metrics", {})
-    ]
+    valid_results = []
+    for item in candidate_results:
+        if not isinstance(item, dict):
+            continue
+        metrics = item.get("metrics")
+        value = metrics.get(metric_name) if isinstance(metrics, dict) else None
+        if isinstance(value, (bool, np.bool_)) or not isinstance(
+            value, (int, float, np.integer, np.floating)
+        ):
+            continue
+        if not np.isfinite(float(value)):
+            continue
+        valid_results.append(item)
 
     if not valid_results:
         return {
@@ -716,7 +881,10 @@ def select_best_model(
         }
 
     valid_results.sort(key=lambda item: str(item.get("model_name", "")))
-    best_result = selector(valid_results, key=lambda item: float(item["metrics"][metric_name]))
+    best_result = selector(
+        valid_results,
+        key=lambda item: float(item["metrics"][metric_name]),
+    )
     best_metrics = best_result.get("metrics", {})
     best_name = best_result.get("model_name")
     best_model = best_result.get("model")

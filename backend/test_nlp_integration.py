@@ -94,6 +94,67 @@ class NlpIntegrationTests(unittest.TestCase):
             group_column="student_id",
         )
 
+    def test_forwards_selected_feature_columns_to_automl(self) -> None:
+        nlp_result = {
+            "ready_for_training": True,
+            "dataset_resolution": self.resolution,
+        }
+        with patch(
+            "services.automl.nlp_integration.run_automl_pipeline",
+            return_value={"status": "success"},
+        ) as run_mock:
+            integrate_nlp_with_automl(
+                self.dataframe,
+                nlp_result,
+                feature_columns=["feature"],
+            )
+
+        run_mock.assert_called_once_with(
+            self.dataframe,
+            "Exited",
+            "Binary Classification",
+            excluded_target_columns=[],
+            feature_columns=["feature"],
+        )
+
+    def test_forwards_bayesian_tuning_options_to_automl(self) -> None:
+        nlp_result = {
+            "ready_for_training": True,
+            "dataset_resolution": self.resolution,
+        }
+        with patch(
+            "services.automl.nlp_integration.run_automl_pipeline",
+            return_value={"status": "success"},
+        ) as run_mock:
+            integrate_nlp_with_automl(
+                self.dataframe,
+                nlp_result,
+                tuning_strategy="bayesian",
+                tuning_trials=6,
+            )
+
+        self.assertEqual(run_mock.call_args.kwargs["tuning_strategy"], "bayesian")
+        self.assertEqual(run_mock.call_args.kwargs["tuning_trials"], 6)
+
+    def test_forwards_auto_tuning_options_to_automl(self) -> None:
+        nlp_result = {
+            "ready_for_training": True,
+            "dataset_resolution": self.resolution,
+        }
+        with patch(
+            "services.automl.nlp_integration.run_automl_pipeline",
+            return_value={"status": "success"},
+        ) as run_mock:
+            integrate_nlp_with_automl(
+                self.dataframe,
+                nlp_result,
+                tuning_strategy="auto",
+                tuning_trials=4,
+            )
+
+        self.assertEqual(run_mock.call_args.kwargs["tuning_strategy"], "auto")
+        self.assertEqual(run_mock.call_args.kwargs["tuning_trials"], 4)
+
     def test_rejects_missing_resolution(self) -> None:
         with self.assertRaises(ValueError):
             integrate_nlp_with_automl(

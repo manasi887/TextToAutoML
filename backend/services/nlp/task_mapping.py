@@ -14,6 +14,10 @@ _REGRESSION_PATTERNS = (
 	re.compile(r"\b(?:use|apply|run|perform|do)\s+(?:a\s+)?regression\b", re.IGNORECASE),
 	re.compile(r"\b(?:numerical|numeric|continuous)\s+(?:value|target|outcome)\b", re.IGNORECASE),
 )
+_PREDICTION_CLASSIFICATION_PATTERN = re.compile(
+	r"\bpredict\b[^.!?;]{0,120}\b(?:class(?:es)?|categor(?:y|ies)|labels?)\b",
+	re.IGNORECASE,
+)
 _NEGATED_INTENT_PREFIX = re.compile(
 	r"\b(?:not|never|without|don't|do not|rather than|instead of)\s+(?:(?:a|an|the)\s+)?$",
 	re.IGNORECASE,
@@ -40,6 +44,11 @@ def detect_explicit_task_intent(text: str) -> str | None:
 	if requests_regression:
 		return "regression"
 	return None
+
+
+def has_prediction_classification_cue(text: str) -> bool:
+	"""Identify prediction wording that refers to a class, category, or label."""
+	return _has_unnegated_match((_PREDICTION_CLASSIFICATION_PATTERN,), text)
 
 
 _INTENT_TO_PROBLEM_TYPE: dict[str, str | None] = {

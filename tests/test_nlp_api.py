@@ -1,5 +1,7 @@
 import sys
+import tempfile
 import unittest
+from functools import wraps
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,6 +14,43 @@ from main import app
 from services.automl.trainer import split_dataset_train_validation_test
 
 
+def _uses_real_intent_model(test_method):
+    @wraps(test_method)
+    def run_with_real_model(*args, **kwargs):
+        from services.nlp import intent_detection
+
+        original_state = (
+            intent_detection.MODEL_DIR,
+            intent_detection._tokenizer,
+            intent_detection._model,
+            intent_detection._label_mapping,
+            intent_detection._temperature,
+        )
+        intent_detection.MODEL_DIR = (
+            Path(__file__).resolve().parents[1]
+            / "backend"
+            / "storage"
+            / "nlp_models"
+            / "intent_classifier"
+        )
+        intent_detection._tokenizer = None
+        intent_detection._model = None
+        intent_detection._label_mapping = None
+        intent_detection._temperature = None
+        try:
+            return test_method(*args, **kwargs)
+        finally:
+            (
+                intent_detection.MODEL_DIR,
+                intent_detection._tokenizer,
+                intent_detection._model,
+                intent_detection._label_mapping,
+                intent_detection._temperature,
+            ) = original_state
+
+    return run_with_real_model
+
+
 class NlpApiTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
@@ -20,6 +59,12 @@ class NlpApiTests(unittest.TestCase):
         )
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.created_files = []
+        self.explanation_patcher = patch(
+            "api.nlp.generate_result_explanation",
+            return_value="Explanation based only on the supplied AutoML result.",
+        )
+        self.explanation_mock = self.explanation_patcher.start()
+        self.addCleanup(self.explanation_patcher.stop)
 
     def tearDown(self):
         for file_path in self.created_files:
@@ -46,7 +91,16 @@ class NlpApiTests(unittest.TestCase):
         }
         integration_result = {
             "nlp_resolution": nlp_result["dataset_resolution"],
-            "automl_training": {"status": "success"},
+            "automl_training": {
+                "status": "success",
+                "problem_type": "Binary Classification",
+                "target_column": "target",
+                "best_model": {
+                    "name": "RandomForestClassifier",
+                    "selection_metric": "accuracy",
+                    "metrics": {"accuracy": 0.853},
+                },
+            },
             "ready_for_training": True,
         }
         report = {"summary": "Classification training completed."}
@@ -64,7 +118,11 @@ class NlpApiTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        expected_response = {**integration_result, "report": report}
+        expected_response = {
+            **integration_result,
+            "report": report,
+            "explanation": "Explanation based only on the supplied AutoML result.",
+        }
         self.assertEqual(response.json(), expected_response)
         process_mock.assert_called_once()
         integrate_mock.assert_called_once()
@@ -72,6 +130,101 @@ class NlpApiTests(unittest.TestCase):
             integration_result["nlp_resolution"],
             integration_result["automl_training"],
         )
+        self.explanation_mock.assert_called_once_with(
+            integration_result["automl_training"]
+        )
+        self.assertEqual(
+            response.json()["automl_training"], integration_result["automl_training"]
+        )
+        self.assertEqual(
+            response.json()["automl_training"]["best_model"]["metrics"]["accuracy"],
+            0.853,
+        )
+
+    def test_nlp_train_forwards_selected_feature_columns(self):
+        dataset_name = "nlp_train_features.csv"
+        self._write_dataset(
+            dataset_name,
+            {"target": [0, 1, 0, 1], "feature": [1, 2, 3, 4]},
+        )
+        nlp_result = {
+            "ready_for_training": True,
+            "dataset_resolution": {
+                "target_column": "target",
+                "problem_type": "Binary Classification",
+            },
+        }
+        integration_result = {
+            "ready_for_training": True,
+            "automl_training": {"status": "failed"},
+        }
+
+        with patch("api.nlp.process_nlp_request", return_value=nlp_result), patch(
+            "api.nlp.integrate_nlp_with_automl",
+            return_value=integration_result,
+        ) as integrate_mock:
+            response = self.client.post(
+                "/nlp/train",
+                json={
+                    "filename": dataset_name,
+                    "text": "Predict target",
+                    "feature_columns": ["feature"],
+                    "tuning_strategy": "bayesian",
+                    "tuning_trials": 4,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            integrate_mock.call_args.kwargs["feature_columns"],
+            ["feature"],
+        )
+        self.assertEqual(integrate_mock.call_args.kwargs["tuning_strategy"], "bayesian")
+        self.assertEqual(integrate_mock.call_args.kwargs["tuning_trials"], 4)
+
+    def test_nlp_train_forwards_auto_optimizer_mode(self):
+        dataset_name = "nlp_train_auto_optimizer.csv"
+        self._write_dataset(
+            dataset_name,
+            {"target": [0, 1, 0, 1], "feature": [1, 2, 3, 4]},
+        )
+        nlp_result = {
+            "ready_for_training": True,
+            "dataset_resolution": {
+                "target_column": "target",
+                "problem_type": "Binary Classification",
+            },
+        }
+        with patch("api.nlp.process_nlp_request", return_value=nlp_result), patch(
+            "api.nlp.integrate_nlp_with_automl",
+            return_value={"ready_for_training": True, "automl_training": {"status": "failed"}},
+        ) as integrate_mock:
+            response = self.client.post(
+                "/nlp/train",
+                json={
+                    "filename": dataset_name,
+                    "text": "Predict target",
+                    "tuning_strategy": "auto",
+                    "tuning_trials": 6,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(integrate_mock.call_args.kwargs["tuning_strategy"], "auto")
+        self.assertEqual(integrate_mock.call_args.kwargs["tuning_trials"], 6)
+
+    def test_nlp_training_rejects_invalid_tuning_settings(self):
+        response = self.client.post(
+            "/nlp/train",
+            json={
+                "filename": "unused.csv",
+                "text": "Predict target",
+                "tuning_strategy": "random",
+                "tuning_trials": 31,
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
 
     def test_upload_then_nlp_analyze_uses_shared_upload_directory(self):
         dataset_name = "upload_nlp_regression.csv"
@@ -137,10 +290,11 @@ class NlpApiTests(unittest.TestCase):
         }
         split_partitions = {}
 
-        def capture_diagnostic(training_df, target_column, group_column=None):
+        def capture_diagnostic(training_df, target_column, group_column=None, problem_type=None):
             captured["training_df"] = training_df.copy()
             captured["target_column"] = target_column
             captured["group_column"] = group_column
+            captured["problem_type"] = problem_type
             return {"target_column": target_column, "warnings": [warning]}
 
         def capture_split(*args, **kwargs):
@@ -171,6 +325,7 @@ class NlpApiTests(unittest.TestCase):
         self.assertEqual(body["training_rows_checked"], len(captured["training_df"]))
         self.assertEqual(captured["target_column"], "target")
         self.assertEqual(captured["group_column"], "group")
+        self.assertEqual(captured["problem_type"], "Binary Classification")
         self.assertEqual(split_partitions["kwargs"]["group_column"], "group")
 
         train_df, validation_df, test_df = split_partitions["partitions"]
@@ -431,6 +586,412 @@ class NlpApiTests(unittest.TestCase):
                 self.assertIsNone(body["automl_training"])
 
         automl_mock.assert_not_called()
+
+    @_uses_real_intent_model
+    def test_automatic_workflow_uploads_trains_persists_and_predicts(self):
+        row_count = 600
+        rows = range(row_count)
+        dataframe = pd.DataFrame(
+            {
+                "feature_a": [index % 11 for index in rows],
+                "feature_b": [index % 17 for index in rows],
+                "segment": ["north", "south", "west"] * (row_count // 3),
+                "Exited": ["yes" if index % 7 > 2 else "no" for index in rows],
+            }
+        )
+        task_text = "Predict whether a customer will churn using the Exited column."
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            temporary_path = Path(temporary_dir)
+            model_dir = temporary_path / "models"
+            history_path = temporary_path / "training_history.json"
+            dataset_name = f"automatic_e2e_{temporary_path.name}.csv"
+            self.created_files.append(self.upload_dir / dataset_name)
+
+            with patch(
+                "services.automl.persistence.DEFAULT_STORAGE_DIR", model_dir
+            ), patch(
+                "services.automl.run_history.HISTORY_PATH", history_path
+            ), patch(
+                "services.metalearning.recommender.HISTORY_PATH", history_path
+            ):
+                upload_response = self.client.post(
+                    "/upload/",
+                    files={
+                        "file": (
+                            dataset_name,
+                            dataframe.to_csv(index=False).encode("utf-8"),
+                            "text/csv",
+                        )
+                    },
+                )
+                self.assertEqual(upload_response.status_code, 200)
+                upload_body = upload_response.json()
+                self.assertTrue(upload_body["validation"]["valid"])
+                self.assertEqual(upload_body["analysis"]["dataset_info"]["rows"], row_count)
+
+                analysis_response = self.client.post(
+                    "/nlp/analyze",
+                    json={"filename": dataset_name, "text": task_text},
+                )
+                self.assertEqual(analysis_response.status_code, 200)
+                analysis = analysis_response.json()
+                self.assertEqual(analysis["intent"]["intent"], "classification")
+                self.assertEqual(analysis["dataset_resolution"]["target_column"], "Exited")
+                self.assertEqual(
+                    analysis["dataset_resolution"]["problem_type"],
+                    "Binary Classification",
+                )
+                self.assertTrue(analysis["ready_for_training"])
+
+                training_response = self.client.post(
+                    "/nlp/train",
+                    json={
+                        "filename": dataset_name,
+                        "text": task_text,
+                        "tuning_strategy": "auto",
+                    },
+                )
+                self.assertEqual(training_response.status_code, 200)
+                training_body = training_response.json()
+                self.assertTrue(training_body["ready_for_training"])
+                training = training_body["automl_training"]
+                self.assertEqual(training["status"], "success")
+                self.assertEqual(training["target_column"], "Exited")
+                self.assertEqual(training["problem_type"], "Binary Classification")
+                self.assertTrue(training["models"]["trained"])
+
+                decision = training["tuning"]
+                self.assertEqual(decision["requested_mode"], "auto")
+                self.assertEqual(decision["selected_strategy"], "random")
+                self.assertEqual(decision["trial_budget"], 8)
+                self.assertEqual(decision["budget_unit"], "trials_per_model")
+                self.assertTrue(decision["reason"])
+                self.assertEqual(
+                    training["best_model"]["selection_metric"], "f1_score"
+                )
+                selected_result = next(
+                    result
+                    for result in training["evaluation"]["results"]
+                    if result["model_name"] == training["best_model"]["name"]
+                )
+                self.assertEqual(
+                    selected_result["metrics"], training["best_model"]["metrics"]
+                )
+
+                model_id = training["model"]["model_id"]
+                self.assertTrue(model_id)
+                from services.automl.persistence import load_model_package
+
+                package = load_model_package(model_id, storage_dir=model_dir)
+                self.assertEqual(package["target_column"], "Exited")
+                self.assertEqual(
+                    package["preprocessing"]["raw_feature_names"],
+                    ["feature_a", "feature_b", "segment"],
+                )
+                self.assertNotIn("Exited", package["preprocessing"]["raw_feature_names"])
+                self.assertTrue(history_path.is_file())
+
+                prediction_response = self.client.post(
+                    "/predict/",
+                    json={
+                        "model_id": model_id,
+                        "data": [
+                            {
+                                "feature_a": 12,
+                                "feature_b": 12,
+                                "segment": "north",
+                            }
+                        ],
+                    },
+                )
+                self.assertEqual(prediction_response.status_code, 200)
+                self.assertEqual(prediction_response.json()["prediction_count"], 1)
+
+                target_included_response = self.client.post(
+                    "/predict/",
+                    json={
+                        "model_id": model_id,
+                        "data": [
+                            {
+                                "feature_a": 12,
+                                "feature_b": 12,
+                                "segment": "north",
+                                "Exited": "yes",
+                            }
+                        ],
+                    },
+                )
+                self.assertEqual(target_included_response.status_code, 400)
+                self.assertIn("must not be provided", target_included_response.json()["detail"])
+
+    @_uses_real_intent_model
+    def test_predict_body_performance_class_resolves_real_categorical_target(self):
+        dataset_path = self.upload_dir / "bodyPerformance.csv"
+        self.assertTrue(dataset_path.is_file())
+
+        response = self.client.post(
+            "/nlp/analyze",
+            json={
+                "filename": dataset_path.name,
+                "text": "Predict body performance class",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(
+            body["dataset_resolution"]["problem_type"],
+            "Multi-class Classification",
+        )
+        self.assertEqual(body["dataset_resolution"]["target_column"], "class")
+        self.assertFalse(body["needs_clarification"])
+        self.assertTrue(body["ready_for_training"])
+
+    def test_predict_body_performance_category_cue_works_with_regression_classifier(self):
+        dataset_path = self.upload_dir / "bodyPerformance.csv"
+        probabilities = {
+            "classification": 0.01,
+            "regression": 0.98,
+            "clustering": 0.005,
+            "unknown": 0.005,
+        }
+        regression_prediction = {
+            "intent": "regression",
+            "confidence": probabilities["regression"],
+            "probabilities": probabilities,
+        }
+
+        with patch(
+            "services.nlp.pipeline.detect_user_intent",
+            return_value=regression_prediction,
+        ):
+            response = self.client.post(
+                "/nlp/analyze",
+                json={
+                    "filename": dataset_path.name,
+                    "text": "Predict body performance category",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["intent"]["intent"], "regression")
+        self.assertEqual(body["task"]["problem_type"], "classification")
+        self.assertEqual(
+            body["dataset_resolution"]["problem_type"],
+            "Multi-class Classification",
+        )
+        self.assertEqual(body["dataset_resolution"]["target_column"], "class")
+        self.assertFalse(body["needs_clarification"])
+        self.assertTrue(body["ready_for_training"])
+
+    @_uses_real_intent_model
+    def test_natural_churn_request_reaches_real_automl_training(self):
+        from services.automl import persistence, run_history
+        from services.automl.nlp_integration import integrate_nlp_with_automl
+        from services.metalearning import recommender
+        from services.nlp.pipeline import process_nlp_request
+
+        indexes = range(120)
+        dataframe = pd.DataFrame(
+            {
+                "Balance": [(index * 37) % 5000 for index in indexes],
+                "Age": [18 + (index * 7) % 60 for index in indexes],
+                "Exited": [index % 2 for index in indexes],
+            }
+        )
+        nlp_result = process_nlp_request("Predict customer churn.", dataframe)
+
+        self.assertEqual(nlp_result["intent"]["intent"], "classification")
+        self.assertEqual(nlp_result["target"]["matched_column"], "Exited")
+        self.assertEqual(
+            nlp_result["dataset_resolution"]["problem_type"],
+            "Binary Classification",
+        )
+        self.assertFalse(nlp_result["needs_clarification"])
+        self.assertTrue(nlp_result["ready_for_training"])
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            temporary_path = Path(temporary_dir)
+            history_path = temporary_path / "training_history.json"
+            with patch.object(
+                persistence, "DEFAULT_STORAGE_DIR", temporary_path / "models"
+            ), patch.object(run_history, "HISTORY_PATH", history_path), patch.object(
+                recommender, "HISTORY_PATH", history_path
+            ):
+                integration = integrate_nlp_with_automl(
+                    dataframe,
+                    nlp_result,
+                    dataset_name="natural_churn.csv",
+                )
+
+            training = integration["automl_training"]
+            self.assertEqual(training["status"], "success")
+            self.assertEqual(training["target_column"], "Exited")
+            self.assertEqual(training["problem_type"], "Binary Classification")
+            self.assertEqual(training["best_model"]["selection_metric"], "f1_score")
+            self.assertTrue(training["model"]["model_id"])
+
+    @_uses_real_intent_model
+    def test_classification_does_not_accept_a_continuous_sales_target(self):
+        from services.nlp.pipeline import process_nlp_request
+
+        indexes = range(40)
+        dataframe = pd.DataFrame(
+            {
+                "Sales": [10.0 + index * 13.5 for index in indexes],
+                "Exited": [index % 2 for index in indexes],
+                "Age": [18 + (index * 7) % 50 for index in indexes],
+            }
+        )
+
+        result = process_nlp_request("Classify sales.", dataframe)
+
+        self.assertEqual(result["task"]["problem_type"], "classification")
+        self.assertEqual(result["target"]["matched_column"], "Sales")
+        self.assertIsNone(result["dataset_resolution"]["target_column"])
+        self.assertTrue(result["needs_clarification"])
+        self.assertFalse(result["ready_for_training"])
+
+    @_uses_real_intent_model
+    def test_real_multiclass_and_regression_requests_reach_automl(self):
+        from services.automl import persistence, run_history
+        from services.automl.nlp_integration import integrate_nlp_with_automl
+        from services.metalearning import recommender
+        from services.nlp.pipeline import process_nlp_request
+
+        indexes = range(120)
+        cases = (
+            (
+                "multiclass",
+                pd.DataFrame(
+                    {
+                        "visits": [index % 13 for index in indexes],
+                        "spend": [(index * 19) % 700 for index in indexes],
+                        "category": [["A", "B", "C"][index % 3] for index in indexes],
+                    }
+                ),
+                "Classify customers into their different categories using the category column.",
+                "category",
+                "Multi-class Classification",
+                "f1_score",
+            ),
+            (
+                "regression",
+                pd.DataFrame(
+                    {
+                        "units": [index % 19 for index in indexes],
+                        "discount": [(index % 5) / 10 for index in indexes],
+                        "Sales": [100 + index * 2.5 + index % 7 for index in indexes],
+                    }
+                ),
+                "Predict the sales value using Sales as the target.",
+                "Sales",
+                "Regression",
+                "rmse",
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            for name, dataframe, text, target, problem_type, metric in cases:
+                nlp_result = process_nlp_request(text, dataframe)
+                self.assertTrue(nlp_result["ready_for_training"], name)
+                self.assertEqual(nlp_result["dataset_resolution"]["target_column"], target)
+                self.assertEqual(
+                    nlp_result["dataset_resolution"]["problem_type"], problem_type
+                )
+
+                case_dir = root / name
+                history_path = case_dir / "training_history.json"
+                with patch.object(
+                    persistence, "DEFAULT_STORAGE_DIR", case_dir / "models"
+                ), patch.object(run_history, "HISTORY_PATH", history_path), patch.object(
+                    recommender, "HISTORY_PATH", history_path
+                ):
+                    integration = integrate_nlp_with_automl(
+                        dataframe,
+                        nlp_result,
+                        dataset_name=f"{name}.csv",
+                    )
+
+                training = integration["automl_training"]
+                self.assertEqual(training["status"], "success", name)
+                self.assertEqual(training["target_column"], target)
+                self.assertEqual(training["problem_type"], problem_type)
+                self.assertEqual(training["best_model"]["selection_metric"], metric)
+                self.assertTrue(training["model"]["model_id"])
+
+    @_uses_real_intent_model
+    def test_real_explicit_target_clustering_and_clarification_routes(self):
+        from services.automl import persistence, run_history
+        from services.automl.nlp_integration import integrate_nlp_with_automl
+        from services.metalearning import recommender
+        from services.nlp.pipeline import process_nlp_request
+
+        indexes = range(120)
+        binary_frame = pd.DataFrame(
+            {
+                "Balance": [(index * 37) % 5000 for index in indexes],
+                "Age": [18 + (index * 7) % 60 for index in indexes],
+                "Exited": [index % 2 for index in indexes],
+            }
+        )
+        explicit = process_nlp_request(
+            "Predict Exited using Exited as the target.", binary_frame
+        )
+        self.assertEqual(explicit["target"]["target_reference"], "exited")
+        self.assertTrue(explicit["target"]["explicit_target_column"])
+        self.assertEqual(explicit["dataset_resolution"]["target_column"], "Exited")
+        self.assertEqual(
+            explicit["dataset_resolution"]["problem_type"], "Binary Classification"
+        )
+        self.assertTrue(explicit["ready_for_training"])
+
+        clustering_frame = pd.DataFrame(
+            {
+                "x": [index % 11 for index in indexes],
+                "y": [(index * 7) % 17 for index in indexes],
+                "z": [(index * 13) % 23 for index in indexes],
+            }
+        )
+        clustering = process_nlp_request(
+            "Find natural groups in this dataset.", clustering_frame
+        )
+        self.assertEqual(clustering["intent"]["intent"], "clustering")
+        self.assertIsNone(clustering["dataset_resolution"]["target_column"])
+        self.assertEqual(clustering["dataset_resolution"]["problem_type"], "Clustering")
+        self.assertTrue(clustering["ready_for_training"])
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            history_path = root / "training_history.json"
+            with patch.object(
+                persistence, "DEFAULT_STORAGE_DIR", root / "models"
+            ), patch.object(run_history, "HISTORY_PATH", history_path), patch.object(
+                recommender, "HISTORY_PATH", history_path
+            ):
+                integration = integrate_nlp_with_automl(
+                    clustering_frame,
+                    clustering,
+                    dataset_name="clustering.csv",
+                )
+            training = integration["automl_training"]
+            self.assertEqual(training["status"], "success")
+            self.assertEqual(training["problem_type"], "Clustering")
+            self.assertIsNone(training["target_column"])
+            self.assertEqual(training["best_model"]["selection_metric"], "silhouette_score")
+
+        for text in ("Analyze this dataset.", "Tell me what you find."):
+            result = process_nlp_request(text, binary_frame)
+            self.assertEqual(result["intent"]["intent"], "unknown")
+            self.assertTrue(result["intent_analysis"]["needs_clarification"])
+            self.assertTrue(result["needs_clarification"])
+            self.assertFalse(result["ready_for_training"])
+            blocked = integrate_nlp_with_automl(binary_frame, result)
+            self.assertTrue(blocked["needs_clarification"])
+            self.assertIsNone(blocked["automl_training"])
 
 
 if __name__ == "__main__":

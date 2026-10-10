@@ -150,7 +150,8 @@ def resolve_dataset_context(
     )
     if (
         target_is_clear
-        and target_result.get("match_type") == "hybrid"
+        and target_result.get("match_type") in {"lexical", "hybrid"}
+        and not target_result.get("explicit_target_column", False)
         and nlp_type in {"classification", "regression"}
     ):
         resolved_type = str(detect_problem_type(df, target_column).get("problem_type", ""))
@@ -170,10 +171,7 @@ def resolve_dataset_context(
         isinstance(target_reference, str)
         and bool(target_reference.strip())
         and nlp_type in {"classification", "regression"}
-        and (
-            not target_is_clear
-            or target_result.get("match_type") == "hybrid"
-        )
+        and not target_is_clear
         and not target_result.get("explicit_target_column", False)
     )
     if (

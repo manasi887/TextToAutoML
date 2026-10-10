@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -9,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from main import app
 from config import UPLOAD_DIR
+from api.train import _serialize_training_result
 
 
 client = TestClient(app)
@@ -53,6 +55,37 @@ def _make_multiclass_dataset(path: Path) -> None:
         }
     )
     df.to_csv(path, index=False)
+
+
+def test_training_result_serializer_keeps_diagnostics_optional_and_backward_compatible():
+    legacy_payload = {
+        "status": "success",
+        "data": {"validation_rows": 10},
+        "models": {"trained": ["ModelA"], "failed": []},
+        "evaluation": {"status": "Completed", "results": []},
+        "best_model": {"name": "ModelA", "selection_metric": "f1_score"},
+        "model": {"name": "ModelA"},
+    }
+
+    legacy_response = _serialize_training_result(legacy_payload)
+    assert "validation_diagnostics" not in legacy_response
+    assert legacy_response["best_model"]["name"] == "ModelA"
+    assert legacy_response["evaluation"]["status"] == "Completed"
+
+    diagnostics = [{
+        "candidate_name": "ModelA",
+        "status": "evaluated",
+        "selection_metric": "balanced_accuracy",
+        "selection_value": 0.75,
+        "training_metrics": {"f1_score": 0.95},
+        "validation_metrics": {"f1_score": 0.8},
+    }]
+    extended_response = _serialize_training_result({
+        **legacy_payload,
+        "validation_diagnostics": diagnostics,
+    })
+    assert extended_response["validation_diagnostics"] == diagnostics
+    assert extended_response["validation_diagnostics"][0]["training_metrics"] != extended_response["validation_diagnostics"][0]["validation_metrics"]
 
 
 def test_valid_regression_training_request(upload_dir):
@@ -107,6 +140,134 @@ def test_training_request_accepts_group_column_and_excludes_it_from_features(upl
     assert response.status_code == 200
     payload = response.json()
     assert payload["preprocessing"]["removed_columns"]["group_columns"] == ["group"]
+
+
+def test_training_request_forwards_selected_feature_columns(upload_dir):
+    dataset_name = "api_feature_selection_test.csv"
+    _make_regression_dataset(upload_dir / dataset_name)
+    pipeline_result = {
+        "status": "success",
+        "target_column": "target",
+        "problem_type": "Regression",
+        "data": {},
+        "preprocessing": {"raw_feature_names": ["feature_1"]},
+        "models": {},
+        "evaluation": {},
+        "best_model": {},
+        "model": {},
+    }
+
+    with patch("api.train.run_automl_pipeline", return_value=pipeline_result) as pipeline_mock:
+        response = client.post(
+            "/train/",
+            json={
+                "filename": dataset_name,
+                "target_column": "target",
+                "problem_type": "Regression",
+                "feature_columns": ["feature_1"],
+            },
+        )
+
+    assert response.status_code == 200
+    assert pipeline_mock.call_args.kwargs["feature_columns"] == ["feature_1"]
+
+
+def test_training_request_forwards_bayesian_strategy_and_trial_budget(upload_dir):
+    dataset_name = "api_bayesian_test.csv"
+    _make_regression_dataset(upload_dir / dataset_name)
+    pipeline_result = {
+        "status": "success",
+        "target_column": "target",
+        "problem_type": "Regression",
+        "data": {},
+        "preprocessing": {},
+        "models": {},
+        "evaluation": {},
+        "best_model": {},
+        "model": {},
+        "tuning": {"strategy": "bayesian", "trials_per_model": 5, "models": {}},
+    }
+
+    with patch("api.train.run_automl_pipeline", return_value=pipeline_result) as pipeline_mock:
+        response = client.post(
+            "/train/",
+            json={
+                "filename": dataset_name,
+                "target_column": "target",
+                "problem_type": "Regression",
+                "tuning_strategy": "bayesian",
+                "tuning_trials": 5,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["tuning"]["strategy"] == "bayesian"
+    assert pipeline_mock.call_args.kwargs["tuning_strategy"] == "bayesian"
+    assert pipeline_mock.call_args.kwargs["tuning_trials"] == 5
+
+
+def test_training_request_forwards_auto_mode_and_returns_decision(upload_dir):
+    dataset_name = "api_auto_optimizer_test.csv"
+    _make_regression_dataset(upload_dir / dataset_name)
+    decision = {
+        "requested_mode": "auto",
+        "selected_strategy": "random",
+        "strategy": "random",
+        "trial_budget": 3,
+        "reason": "Automatic policy selected Random Search.",
+        "workload": {"candidate_model_count": 3},
+        "models": {},
+    }
+    pipeline_result = {
+        "status": "success",
+        "target_column": "target",
+        "problem_type": "Regression",
+        "data": {},
+        "preprocessing": {},
+        "models": {},
+        "evaluation": {},
+        "best_model": {},
+        "model": {},
+        "tuning": decision,
+    }
+
+    with patch("api.train.run_automl_pipeline", return_value=pipeline_result) as pipeline_mock:
+        response = client.post(
+            "/train/",
+            json={
+                "filename": dataset_name,
+                "target_column": "target",
+                "problem_type": "Regression",
+                "tuning_strategy": "auto",
+                "tuning_trials": 6,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["tuning"] == decision
+    assert pipeline_mock.call_args.kwargs["tuning_strategy"] == "auto"
+    assert pipeline_mock.call_args.kwargs["tuning_trials"] == 6
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"tuning_strategy": "random"},
+        {"tuning_trials": 31},
+        {"tuning_trials": 0},
+    ],
+)
+def test_training_request_rejects_invalid_tuning_settings(settings):
+    response = client.post(
+        "/train/",
+        json={
+            "filename": "unused.csv",
+            "target_column": "target",
+            **settings,
+        },
+    )
+
+    assert response.status_code == 422
 
 
 def test_valid_binary_classification_training_request(upload_dir):
@@ -241,7 +402,7 @@ def test_successful_response_contains_only_json_serializable_fields(upload_dir):
     assert response.status_code == 200
     payload = response.json()
 
-    assert set(payload.keys()) == {"status", "filename", "target_column", "problem_type", "data", "preprocessing", "models", "evaluation", "best_model", "model"}
+    assert set(payload.keys()) == {"status", "filename", "target_column", "problem_type", "data", "preprocessing", "models", "evaluation", "best_model", "model", "validation_diagnostics"}
     assert isinstance(payload["data"], dict)
     assert isinstance(payload["models"], dict)
     assert isinstance(payload["evaluation"], dict)

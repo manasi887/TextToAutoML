@@ -114,6 +114,20 @@ def record_training_run(
         "training_time_seconds": training_output.get("training_time_seconds"),
         "meta_features": meta_features,
     }
+    tuning = training_output.get("tuning")
+    if isinstance(tuning, dict):
+        record["optimizer_decision"] = {
+            key: tuning.get(key)
+            for key in (
+                "requested_mode",
+                "selected_strategy",
+                "trial_budget",
+                "reason",
+                "tuning_duration_seconds",
+                "workload",
+            )
+            if key in tuning
+        }
     history.append(record)
     target_path.write_text(json.dumps(history, indent=2) + "\n", encoding="utf-8")
     return record, comparison

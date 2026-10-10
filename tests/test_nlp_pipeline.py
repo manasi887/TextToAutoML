@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
@@ -40,6 +41,20 @@ def _housing_dataframe():
             "median_house_value": [220000, 250000, 300000, 310000],
         }
     )
+
+
+def _regression_intent():
+    probabilities = {
+        "classification": 0.01,
+        "regression": 0.98,
+        "clustering": 0.005,
+        "unknown": 0.005,
+    }
+    return {
+        "intent": "regression",
+        "confidence": probabilities["regression"],
+        "probabilities": probabilities,
+    }
 
 
 def test_estimates_time_after_successful_dataset_resolution():
@@ -356,3 +371,212 @@ def test_conflicting_task_instructions_preserve_clarification_behavior():
     assert result["target"]["matched_column"] == "median_house_value"
     assert result["needs_clarification"] is True
     assert result["ready_for_training"] is False
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "Predict body performance class",
+        "Predict the class",
+    ],
+)
+def test_predict_class_label_wording_resolves_categorical_target_despite_regression_classifier(
+    prompt,
+):
+    dataframe = pd.DataFrame(
+        {
+            "class": ["A", "B", "C", "D"] * 5,
+            "body performance": [index / 10 for index in range(20)],
+            "age": [20 + index for index in range(20)],
+        }
+    )
+
+    with patch(
+        "services.nlp.pipeline.detect_user_intent",
+        return_value=_regression_intent(),
+    ):
+        result = process_nlp_request(prompt, dataframe)
+
+    assert result["intent"]["intent"] == "regression"
+    assert result["task"]["problem_type"] == "classification"
+    assert result["dataset_resolution"]["target_column"] == "class"
+    assert result["dataset_resolution"]["problem_type"] == "Multi-class Classification"
+    assert result["needs_clarification"] is False
+    assert result["ready_for_training"] is True
+
+
+def test_predict_category_cue_resolves_an_exact_categorical_category_column():
+    dataframe = pd.DataFrame(
+        {
+            "body_performance_category": ["A", "B", "C", "D"] * 5,
+            "feature": [index / 10 for index in range(20)],
+        }
+    )
+
+    with patch(
+        "services.nlp.pipeline.detect_user_intent",
+        return_value=_regression_intent(),
+    ):
+        result = process_nlp_request("Predict body performance category", dataframe)
+
+    assert result["task"]["problem_type"] == "classification"
+    assert result["dataset_resolution"]["target_column"] == "body_performance_category"
+    assert result["dataset_resolution"]["problem_type"] == "Multi-class Classification"
+    assert result["ready_for_training"] is True
+
+
+def test_numeric_target_named_class_is_not_forced_to_classification():
+    dataframe = pd.DataFrame(
+        {
+            "class": [float(index * 10 + 1) for index in range(20)],
+            "feature": [index % 4 for index in range(20)],
+        }
+    )
+
+    with patch(
+        "services.nlp.pipeline.detect_user_intent",
+        return_value=_regression_intent(),
+    ):
+        result = process_nlp_request("Predict the class", dataframe)
+
+    assert result["intent"]["intent"] == "regression"
+    assert result["task"]["problem_type"] == "classification"
+    assert result["dataset_resolution"]["target_column"] is None
+    assert result["needs_clarification"] is True
+    assert result["ready_for_training"] is False
+
+
+def test_ambiguous_class_like_targets_still_require_clarification():
+    dataframe = pd.DataFrame(
+        {
+            "class_label": ["A", "B", "C", "D"] * 5,
+            "class_type": ["W", "X", "Y", "Z"] * 5,
+            "age": [20 + index for index in range(20)],
+        }
+    )
+
+    with patch(
+        "services.nlp.pipeline.detect_user_intent",
+        return_value=_regression_intent(),
+    ):
+        result = process_nlp_request("Predict the class", dataframe)
+
+    assert result["task"]["problem_type"] == "classification"
+    assert result["dataset_resolution"]["target_column"] is None
+    assert result["needs_clarification"] is True
+    assert result["ready_for_training"] is False
+
+
+def test_explicit_regression_and_numeric_prediction_wording_takes_precedence():
+    dataframe = pd.DataFrame(
+        {
+            "Sales": [float(index * 10 + 1) for index in range(20)],
+            "feature": [index % 4 for index in range(20)],
+        }
+    )
+    requests = (
+        "This is a regression task. Predict the class in Sales.",
+        "Make a numeric prediction for Sales.",
+    )
+
+    with patch(
+        "services.nlp.pipeline.detect_user_intent",
+        return_value=_regression_intent(),
+    ):
+        for request in requests:
+            result = process_nlp_request(request, dataframe)
+            assert result["task"]["problem_type"] == "regression"
+            assert result["dataset_resolution"]["problem_type"] == "Regression"
+            assert result["dataset_resolution"]["target_column"] == "Sales"
+            assert result["ready_for_training"] is True
+
+
+def test_explicit_regression_prevents_class_cue_from_overriding_numeric_target():
+    dataframe = pd.DataFrame(
+        {
+            "class": [float(index * 10 + 1) for index in range(20)],
+            "feature": [index % 4 for index in range(20)],
+        }
+    )
+
+    with patch(
+        "services.nlp.pipeline.detect_user_intent",
+        return_value=_regression_intent(),
+    ):
+        result = process_nlp_request(
+            "This is a regression task. Predict the class", dataframe
+        )
+
+    assert result["task"]["problem_type"] == "regression"
+    assert result["dataset_resolution"]["target_column"] == "class"
+    assert result["dataset_resolution"]["problem_type"] == "Regression"
+    assert result["ready_for_training"] is True
+
+
+def test_explicit_classify_request_still_uses_existing_classification_behavior():
+    dataframe = pd.DataFrame(
+        {
+            "class": ["A", "B", "C", "D"] * 5,
+            "feature": [index % 6 for index in range(20)],
+        }
+    )
+
+    with patch(
+        "services.nlp.pipeline.detect_user_intent",
+        return_value=_regression_intent(),
+    ):
+        result = process_nlp_request("Classify body performance class", dataframe)
+
+    assert result["task"]["problem_type"] == "classification"
+    assert result["dataset_resolution"]["problem_type"] == "Multi-class Classification"
+    assert result["dataset_resolution"]["target_column"] == "class"
+    assert result["ready_for_training"] is True
+
+
+def test_prediction_class_cue_does_not_change_clustering_or_generic_ambiguity():
+    dataframe = pd.DataFrame(
+        {
+            "feature_a": [index % 7 for index in range(20)],
+            "feature_b": [index % 11 for index in range(20)],
+        }
+    )
+    clustering_probabilities = {
+        "classification": 0.02,
+        "regression": 0.03,
+        "clustering": 0.94,
+        "unknown": 0.01,
+    }
+    clustering_intent = {
+        "intent": "clustering",
+        "confidence": 0.94,
+        "probabilities": clustering_probabilities,
+    }
+    unknown_probabilities = {
+        "classification": 0.1,
+        "regression": 0.1,
+        "clustering": 0.1,
+        "unknown": 0.7,
+    }
+    unknown_intent = {
+        "intent": "unknown",
+        "confidence": 0.7,
+        "probabilities": unknown_probabilities,
+    }
+
+    with patch(
+        "services.nlp.pipeline.detect_user_intent",
+        return_value=clustering_intent,
+    ):
+        clustering = process_nlp_request("Group records by pattern", dataframe)
+    with patch(
+        "services.nlp.pipeline.detect_user_intent",
+        return_value=unknown_intent,
+    ):
+        ambiguous = process_nlp_request("Analyze this dataset", dataframe)
+
+    assert clustering["task"]["problem_type"] == "clustering"
+    assert clustering["dataset_resolution"]["problem_type"] == "Clustering"
+    assert clustering["ready_for_training"] is True
+    assert ambiguous["intent"]["intent"] == "unknown"
+    assert ambiguous["needs_clarification"] is True
+    assert ambiguous["ready_for_training"] is False

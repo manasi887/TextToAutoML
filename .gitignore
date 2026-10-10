@@ -14,3 +14,9 @@ backend/venv/
 backend/storage/
 node_modules/
 dist/
+# Generated image-classification model artifacts
+storage/image_models/
+
+# Temporary local test and diagnostic files
+iris_test.csv
+warnings_log.txt

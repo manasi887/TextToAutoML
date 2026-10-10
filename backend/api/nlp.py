@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
@@ -10,6 +11,7 @@ from services.automl.nlp_integration import integrate_nlp_with_automl
 from services.automl.target_proxy_diagnostic import diagnose_target_proxy_features
 from services.automl.trainer import split_dataset_train_validation_test
 from services.reporting.training_report import generate_training_report
+from services.explanation.automl_result import generate_result_explanation
 from services.nlp.pipeline import process_nlp_request
 
 
@@ -23,6 +25,9 @@ class NLPRequest(BaseModel):
     filename: str = Field(..., min_length=1)
     text: str = Field(..., min_length=1)
     group_column: str | None = None
+    feature_columns: list[str] | None = None
+    tuning_strategy: Literal["grid", "bayesian", "auto"] = "grid"
+    tuning_trials: int = Field(8, ge=1, le=30)
 
     @field_validator("filename", "text")
     @classmethod
@@ -183,6 +188,7 @@ async def diagnose_nlp_target_proxies(request: NLPRequest):
             train_df,
             target_column,
             group_column=request.group_column,
+            problem_type=problem_type,
         )
     except (TypeError, ValueError) as exc:
         raise HTTPException(
@@ -225,11 +231,19 @@ async def train_from_nlp_request(request: NLPRequest):
     try:
         df = load_dataset(str(file_path))
         nlp_result = process_nlp_request(request.text, df)
+        tuning_options: dict[str, Any] = {}
+        if request.tuning_strategy != "grid":
+            tuning_options = {
+                "tuning_strategy": request.tuning_strategy,
+                "tuning_trials": request.tuning_trials,
+            }
         integration_result = integrate_nlp_with_automl(
             df,
             nlp_result,
             dataset_name=filename,
             group_column=request.group_column,
+            feature_columns=request.feature_columns,
+            **tuning_options,
         )
         automl_training = integration_result.get("automl_training")
         if (
@@ -240,6 +254,9 @@ async def train_from_nlp_request(request: NLPRequest):
             integration_result["report"] = generate_training_report(
                 integration_result["nlp_resolution"],
                 automl_training,
+            )
+            integration_result["explanation"] = generate_result_explanation(
+                automl_training
             )
         return integration_result
     except (OSError, TypeError, ValueError) as exc:

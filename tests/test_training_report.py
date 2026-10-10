@@ -33,6 +33,11 @@ def test_training_report_includes_model_id_and_failed_model_count():
                 "selection_metric": "f1_score",
                 "metrics": {"f1_score": 0.9},
             },
+            "validation_diagnostics": [{
+                "candidate_name": "RandomForestClassifier",
+                "training_metrics": {"f1_score": 0.98, "balanced_accuracy": 0.97},
+                "validation_metrics": {"f1_score": 0.9, "balanced_accuracy": 0.89},
+            }],
             "model": {"model_id": "automl_20260910_232625_aaf2da"},
         },
     )
@@ -41,6 +46,9 @@ def test_training_report_includes_model_id_and_failed_model_count():
     assert report["dataset"]["features"] == 3
     assert report["warnings"] == {"failed_model_count": 1}
     assert report["models"] == {"trained": 1, "failed": 1}
+    assert report["best_model"]["metrics"] == {"f1_score": 0.9}
+    assert report["best_model"]["training_metrics"]["f1_score"] == 0.98
+    assert report["best_model"]["validation_metrics"]["f1_score"] == 0.9
     json.dumps(report)
 
 

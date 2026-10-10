@@ -103,6 +103,9 @@ def generate_training_report(
     model = automl_training.get("model")
     if not isinstance(model, dict):
         model = {}
+    validation_diagnostics = automl_training.get("validation_diagnostics")
+    if not isinstance(validation_diagnostics, list):
+        validation_diagnostics = []
 
     trained = _list_value(models.get("trained"))
     failed = _list_value(models.get("failed"))
@@ -111,6 +114,14 @@ def generate_training_report(
     selection_metric = best_model.get("selection_metric")
     if best_name is not None:
         best_name = str(best_name)
+    selected_diagnostics = next(
+        (
+            item
+            for item in validation_diagnostics
+            if isinstance(item, dict) and item.get("candidate_name") == best_name
+        ),
+        None,
+    )
 
     report = {
         "summary": _summary(
@@ -143,6 +154,14 @@ def generate_training_report(
             "metrics": _json_safe(best_model.get("metrics", {}))
             if isinstance(best_model.get("metrics", {}), dict)
             else {},
+            **(
+                {
+                    "training_metrics": _json_safe(selected_diagnostics.get("training_metrics")),
+                    "validation_metrics": _json_safe(selected_diagnostics.get("validation_metrics")),
+                }
+                if selected_diagnostics is not None
+                else {}
+            ),
         },
         "warnings": {
             "failed_model_count": len(failed),

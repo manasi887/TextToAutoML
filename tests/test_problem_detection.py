@@ -152,6 +152,48 @@ def test_detect_identifier_columns_ignores_measurements_and_postal_codes():
     assert "Postal Code" not in identifiers
 
 
+def test_high_uniqueness_continuous_measurement_is_not_an_identifier():
+    dataframe = pd.DataFrame(
+        {
+            "average_measurement": [float(index) + 0.125 for index in range(100)],
+            "feature": [index % 5 for index in range(100)],
+        }
+    )
+
+    identifiers = detect_identifier_columns(dataframe)["identifier_columns"]
+
+    assert "average_measurement" not in identifiers
+
+
+def test_high_cardinality_categorical_feature_is_not_an_identifier_by_uniqueness_alone():
+    dataframe = pd.DataFrame(
+        {
+            "device_category": [f"category-{index:03}" for index in range(100)],
+            "feature": [index % 5 for index in range(100)],
+        }
+    )
+
+    identifiers = detect_identifier_columns(dataframe)["identifier_columns"]
+
+    assert "device_category" not in identifiers
+
+
+def test_id_and_customer_id_remain_identifiers():
+    dataframe = pd.DataFrame(
+        {
+            "id": list(range(100, 200)),
+            "customer_id": [f"customer-{index:04}" for index in range(100)],
+            "measurement": [float(index) + 0.25 for index in range(100)],
+        }
+    )
+
+    identifiers = detect_identifier_columns(dataframe)["identifier_columns"]
+
+    assert "id" in identifiers
+    assert "customer_id" in identifiers
+    assert "measurement" not in identifiers
+
+
 def test_detect_target_candidates_ranks_income_over_workclass():
     df = pd.DataFrame(
         {

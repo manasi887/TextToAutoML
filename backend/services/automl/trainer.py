@@ -65,6 +65,7 @@ def prepare_training_data(
     df: pd.DataFrame,
     target_column: str,
     group_column: str | None = None,
+    feature_columns: List[str] | None = None,
 ) -> Dict[str, object]:
       """
       Prepare a dataset for machine learning (data preparation stage of AutoML).
@@ -89,6 +90,12 @@ def prepare_training_data(
           raise ValueError(f"Group column '{group_column}' is not present in the DataFrame.")
       if group_column == target_column:
           raise ValueError("Group column must be different from the target column.")
+      if feature_columns is not None:
+          if not isinstance(feature_columns, list) or any(not isinstance(column, str) for column in feature_columns):
+              raise ValueError("feature_columns must be a list of column names.")
+          missing_columns = [column for column in feature_columns if column not in df.columns]
+          if missing_columns:
+              raise ValueError(f"Feature column(s) not present in the DataFrame: {', '.join(missing_columns)}")
 
       working_df = df.copy()
 
@@ -101,7 +108,13 @@ def prepare_training_data(
       columns_to_exclude = [target_column]
       if group_column is not None:
           columns_to_exclude.append(group_column)
-      X = working_df.drop(columns=columns_to_exclude)
+      if feature_columns is None:
+          X = working_df.drop(columns=columns_to_exclude)
+      else:
+          selected_columns = list(dict.fromkeys(
+              column for column in feature_columns if column not in columns_to_exclude
+          ))
+          X = working_df.loc[:, selected_columns].copy()
 
       # Capture target metadata before any transformation
       target_dtype = str(y.dtype)
@@ -494,13 +507,21 @@ def transform_training_target(values: pd.Series, preparation: Dict[str, object])
 
 
 def prepare_clustering_data(
-    df: pd.DataFrame, excluded_target_columns: List[str] | None = None
+    df: pd.DataFrame,
+    excluded_target_columns: List[str] | None = None,
+    feature_columns: List[str] | None = None,
 ) -> Dict[str, object]:
       """Prepare feature data for unsupervised clustering without a target column."""
       if not isinstance(df, pd.DataFrame):
           raise TypeError("df must be a pandas DataFrame")
       if df.empty:
           raise ValueError("Input dataset is empty.")
+      if feature_columns is not None:
+          if not isinstance(feature_columns, list) or any(not isinstance(column, str) for column in feature_columns):
+              raise ValueError("feature_columns must be a list of column names.")
+          missing_columns = [column for column in feature_columns if column not in df.columns]
+          if missing_columns:
+              raise ValueError(f"Feature column(s) not present in the DataFrame: {', '.join(missing_columns)}")
 
       working_df = df.copy()
       from services.dataset.intelligence import detect_identifier_columns, detect_constant_columns
@@ -517,7 +538,13 @@ def prepare_clustering_data(
           for column in identifier_cols + constant_cols + excluded_target_columns
           if column in working_df.columns
       ))
-      X = working_df.drop(columns=columns_to_drop, errors="ignore")
+      if feature_columns is None:
+          X = working_df.drop(columns=columns_to_drop, errors="ignore")
+      else:
+          selected_columns = list(dict.fromkeys(
+              column for column in feature_columns if column not in columns_to_drop
+          ))
+          X = working_df.loc[:, selected_columns].copy()
 
       numeric_columns = X.select_dtypes(include=["number"]).columns.tolist()
       numeric_imputation_values: Dict[str, float] = {}

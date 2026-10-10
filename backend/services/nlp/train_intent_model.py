@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 import sys
 from pathlib import Path
@@ -272,8 +273,86 @@ def evaluate_model(trainer: Any, test_dataset: Any, test_dataframe: Any, metrics
     }
 
 
-def save_model(trainer: Any, tokenizer: Any, output_dir: Path = OUTPUT_DIR) -> None:
-    """Save model, tokenizer, and inference label mapping."""
+def calibrate_temperature(
+    model: Any,
+    validation_dataset: Any,
+    *,
+    device: Any,
+    tokenizer: Any = None,
+    batch_size: int = 8,
+    step_size: float = 0.1,
+    max_iter: int = 50,
+    min_temperature: float = 0.1,
+) -> float:
+    """Learn a scalar temperature on the validation set using cross-entropy minimization."""
+    import torch
+
+    model.to(device)
+    model.eval()
+    validation_batches = validation_dataset
+    if tokenizer is not None:
+        from torch.utils.data import DataLoader
+        from transformers import DataCollatorWithPadding
+
+        validation_batches = DataLoader(
+            validation_dataset,
+            batch_size=batch_size,
+            collate_fn=DataCollatorWithPadding(tokenizer=tokenizer),
+        )
+
+    temperature = torch.nn.Parameter(torch.tensor(1.0, dtype=torch.float32, device=device))
+    optimizer = torch.optim.LBFGS([temperature], lr=step_size, max_iter=max_iter)
+    loss_function = torch.nn.CrossEntropyLoss()
+
+    def closure() -> Any:
+        optimizer.zero_grad()
+        total_loss = torch.tensor(0.0, device=device)
+        batch_count = 0
+        for batch in validation_batches:
+            labels = batch["labels"].to(device)
+            model_inputs = {
+                key: value.to(device)
+                for key, value in batch.items()
+                if key != "labels"
+            }
+            logits = model(**model_inputs).logits
+            scaled_logits = logits / temperature.clamp(min=min_temperature)
+            loss = loss_function(scaled_logits, labels)
+            loss.backward()
+            total_loss = total_loss + loss.detach()
+            batch_count += 1
+        if batch_count:
+            total_loss = total_loss / batch_count
+        return total_loss
+
+    optimizer.step(closure)
+    calibrated_temperature = float(temperature.detach().clamp(min=min_temperature).item())
+    return calibrated_temperature
+
+
+def save_temperature(temperature: float, output_dir: Path = OUTPUT_DIR) -> None:
+    """Persist a learned temperature, using the neutral value for invalid input."""
+    try:
+        calibrated_temperature = float(temperature)
+    except (TypeError, ValueError):
+        calibrated_temperature = 1.0
+    if not math.isfinite(calibrated_temperature) or calibrated_temperature <= 0:
+        calibrated_temperature = 1.0
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "temperature.json").write_text(
+        json.dumps({"temperature": calibrated_temperature}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def save_model(
+    trainer: Any,
+    tokenizer: Any,
+    output_dir: Path = OUTPUT_DIR,
+    *,
+    temperature: float | None = None,
+) -> None:
+    """Save model, tokenizer, label mapping, and optional calibration temperature."""
     output_dir.mkdir(parents=True, exist_ok=True)
     trainer.save_model(str(output_dir))
     tokenizer.save_pretrained(str(output_dir))
@@ -285,6 +364,8 @@ def save_model(trainer: Any, tokenizer: Any, output_dir: Path = OUTPUT_DIR) -> N
         json.dumps(mapping, indent=2) + "\n",
         encoding="utf-8",
     )
+    if temperature is not None:
+        save_temperature(temperature, output_dir)
 
 
 def _print_distribution(name: str, dataframe: Any) -> None:
@@ -338,6 +419,12 @@ def main() -> None:
             },
         ),
     )
+    temperature = calibrate_temperature(
+        trainer.model,
+        validation_dataset,
+        device=dependencies["torch"].device("cuda" if dependencies["torch"].cuda.is_available() else "cpu"),
+        tokenizer=tokenizer,
+    )
     results = evaluate_model(
         trainer,
         test_dataset,
@@ -349,7 +436,7 @@ def main() -> None:
             "precision_recall_fscore_support": dependencies["precision_recall_fscore_support"],
         },
     )
-    save_model(trainer, tokenizer)
+    save_model(trainer, tokenizer, temperature=temperature)
     print(f"Final test accuracy: {results['accuracy']:.4f}")
     print(f"Final macro precision: {results['precision_macro']:.4f}")
     print(f"Final macro recall: {results['recall_macro']:.4f}")

@@ -22,5 +22,8 @@ tzdata==2026.3
 uvicorn==0.51.0
 scikit-learn==1.5.1
 torch==2.4.1
+torchvision==0.19.1
 transformers==4.43.0
 accelerate==0.31.0
+# Optional Bayesian optimization dependency; install explicitly to enable this strategy.
+# optuna>=4.0,<5

@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from fastapi import APIRouter, HTTPException, status
@@ -21,6 +21,9 @@ class TrainRequest(BaseModel):
     filename: str = Field(..., min_length=1)
     target_column: str = Field(..., min_length=1)
     group_column: str | None = None
+    feature_columns: list[str] | None = None
+    tuning_strategy: Literal["grid", "bayesian", "auto"] = "grid"
+    tuning_trials: int = Field(8, ge=1, le=30)
     problem_type: str | None = None
     test_size: float = Field(0.2, gt=0.0, lt=1.0)
     random_state: int = 42
@@ -83,6 +86,16 @@ def _serialize_training_result(payload: dict[str, Any]) -> dict[str, Any]:
         "best_model": _to_json_safe(payload.get("best_model", {})),
         "model": _to_json_safe(payload.get("model", {})),
     }
+    validation_diagnostics = payload.get("validation_diagnostics")
+    if isinstance(validation_diagnostics, list):
+        result["validation_diagnostics"] = _to_json_safe(validation_diagnostics)
+
+    tuning = payload.get("tuning")
+    if isinstance(tuning, dict) and (
+        tuning.get("strategy") == "bayesian"
+        or tuning.get("requested_mode") == "auto"
+    ):
+        result["tuning"] = _to_json_safe(tuning)
 
     if isinstance(result["preprocessing"], dict):
         result["preprocessing"] = {
@@ -188,13 +201,21 @@ async def train_dataset(request: TrainRequest):
         )
 
     try:
+        tuning_options: dict[str, Any] = {}
+        if request.tuning_strategy != "grid":
+            tuning_options = {
+                "tuning_strategy": request.tuning_strategy,
+                "tuning_trials": request.tuning_trials,
+            }
         pipeline_result = run_automl_pipeline(
             df,
             target_column=target_column,
             group_column=request.group_column,
+            feature_columns=request.feature_columns,
             problem_type=problem_type,
             test_size=request.test_size,
             random_state=request.random_state,
+            **tuning_options,
         )
     except ValueError as exc:
         message = str(exc)

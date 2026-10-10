@@ -334,6 +334,41 @@ def test_vague_target_wording_does_not_semantically_select_a_column():
     assert match_target_column("Tell me about this dataset", dataframe)["needs_clarification"] is True
 
 
+def test_space_underscore_case_and_multiword_column_names_match_safely():
+    cases = (
+        ("customer churn", "customer_churn"),
+        ("customer satisfaction", "Customer Satisfaction"),
+        ("EXITED", "Exited"),
+        ("customer-id", "Customer_ID"),
+    )
+    for target, column in cases:
+        result = match_target_column(target, pd.DataFrame({column: [0, 1, 0]}))
+        assert result["matched_column"] == column
+        assert result["needs_clarification"] is False
+
+
+def test_sales_near_matches_remain_ambiguous_and_weather_does_not_match():
+    ambiguous = match_target_column(
+        "sales",
+        pd.DataFrame(
+            {
+                "sales": [1, 2, 3, 4],
+                "sales_amount": [10, 20, 30, 40],
+                "revenue": [11, 19, 31, 42],
+            }
+        ),
+    )
+    no_match = match_target_column(
+        "weather",
+        pd.DataFrame({"Age": [20, 30, 40], "Balance": [1.0, 2.0, 3.0]}),
+    )
+
+    assert ambiguous["matched_column"] is None
+    assert ambiguous["needs_clarification"] is True
+    assert no_match["matched_column"] is None
+    assert no_match["needs_clarification"] is True
+
+
 if __name__ == "__main__":
     test_target_matching()
     sys.exit(0)

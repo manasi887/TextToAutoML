@@ -101,6 +101,53 @@ def test_bank_outcome_request_prefers_exit_over_generic_customer_segment():
     assert result["needs_clarification"] is False
 
 
+_EXPLICIT_BANK_CHURN_PROMPT = (
+    "Build a binary classification model to predict whether a bank customer will leave the bank. "
+    "The target column is strictly Exited, where 1 means the customer has exited and "
+    "0 means the customer has stayed."
+)
+
+
+def test_explicit_bank_churn_target_resolves_exited_as_binary_classification():
+    dataframe = pd.DataFrame(
+        {
+            "Balance": [1200.0, 900.0, 700.0, 300.0] * 5,
+            "Age": [22, 37, 46, 58] * 5,
+            "Exited": [0, 1] * 10,
+        }
+    )
+
+    result = _analyze(_EXPLICIT_BANK_CHURN_PROMPT, dataframe, "regression")
+
+    assert result["task"]["problem_type"] == "classification"
+    assert result["target"]["target_reference"] == "exited"
+    assert result["target"]["matched_column"] == "Exited"
+    assert result["dataset_resolution"]["target_column"] == "Exited"
+    assert result["dataset_resolution"]["problem_type"] == "Binary Classification"
+    assert result["needs_clarification"] is False
+    assert result["ready_for_training"] is True
+
+
+def test_explicit_exited_does_not_match_exit_or_fall_back_to_another_candidate():
+    dataframe = pd.DataFrame(
+        {
+            "Balance": [1200.0, 900.0, 700.0, 300.0] * 5,
+            "Age": [22, 37, 46, 58] * 5,
+            "exit": [0, 1] * 10,
+        }
+    )
+
+    result = _analyze(_EXPLICIT_BANK_CHURN_PROMPT, dataframe, "regression")
+
+    assert result["task"]["problem_type"] == "classification"
+    assert result["target"]["target_reference"] == "exited"
+    assert result["target"]["matched_column"] is None
+    assert result["dataset_resolution"]["target_column"] is None
+    assert result["dataset_resolution"]["problem_type"] == "Classification"
+    assert result["needs_clarification"] is True
+    assert result["ready_for_training"] is False
+
+
 def test_bank_churn_structural_evidence_overrides_semantic_hard_negative():
     from services.nlp.target_matching import _apply_structural_preference
 

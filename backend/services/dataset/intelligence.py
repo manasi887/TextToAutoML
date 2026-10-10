@@ -467,7 +467,13 @@ def _evaluate_identifier_column(
     if _matches_identifier_data(series, column_name, row_count):
         details["reasons"].append("data_pattern")
 
-    is_identifier = bool(details["reasons"]) and (unique_ratio >= 0.8 or unique_count >= 10)
+    has_identifier_evidence = any(
+        reason in {"name_pattern", "data_pattern"}
+        for reason in details["reasons"]
+    )
+    is_identifier = has_identifier_evidence and (
+        unique_ratio >= 0.8 or unique_count >= 10
+    )
     return {"is_identifier": is_identifier, "details": details}
 
 

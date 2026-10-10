@@ -1,5 +1,6 @@
 """Orchestration for the isolated NLP-to-AutoML decision pipeline."""
 
+import re
 from typing import Any
 
 import pandas as pd
@@ -9,7 +10,11 @@ from .dataset_resolution import resolve_dataset_context
 from .intent_detection import detect_user_intent
 from .target_extraction import extract_target_reference
 from .target_matching import match_target_column
-from .task_mapping import detect_explicit_task_intent, map_intent_to_task
+from .task_mapping import (
+    detect_explicit_task_intent,
+    has_prediction_classification_cue,
+    map_intent_to_task,
+)
 from services.automl.time_estimator import estimate_training_time
 
 
@@ -40,6 +45,19 @@ def process_nlp_request(user_text: str, df: pd.DataFrame) -> dict[str, Any]:
             ),
         }
         task_intent = explicit_task_intent
+    elif (
+        has_prediction_classification_cue(user_text)
+        and not re.search(r"\b(?:regression|numeric|numerical|continuous)\b", user_text, re.IGNORECASE)
+    ):
+        intent_analysis = {
+            **intent_analysis,
+            "classifier_needs_clarification": classifier_needs_clarification,
+            "needs_clarification": False,
+            "clarification_reason": (
+                "Prediction wording refers to a class, category, or label; dataset resolution will verify the target type."
+            ),
+        }
+        task_intent = "classification"
     else:
         task_intent = intent
     task_result = map_intent_to_task(task_intent)

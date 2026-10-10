@@ -16,7 +16,12 @@ _WH_QUESTION_START = re.compile(
 )
 _ACTION_ONLY_ENDING = re.compile(r"\b(?:predict|estimate|forecast|classify|identify|determine)$", re.IGNORECASE)
 _COLUMN_TOKEN = r"[`'\"]?([\w][\w.-]*)[`'\"]?"
+_TARGET_NAME_QUALIFIER = r"(?:(?:strictly|specifically|explicitly)\s+)?"
 _EXPLICIT_TARGET_PATTERNS = (
+    re.compile(
+        rf"\busing\s+(?:the\s+)?{_COLUMN_TOKEN}\s+as\s+(?:the\s+)?target(?:\s+column)?\b",
+        re.IGNORECASE,
+    ),
     re.compile(
         rf"\bwith\s+(?:the\s+)?{_COLUMN_TOKEN}\s+as\s+(?:the\s+)?target(?:\s+column)?\b",
         re.IGNORECASE,
@@ -26,13 +31,17 @@ _EXPLICIT_TARGET_PATTERNS = (
         re.IGNORECASE,
     ),
     re.compile(
-        rf"\b(?:target|label)(?:\s+(?:column|field))?\s*(?:is|:|=)\s*{_COLUMN_TOKEN}",
+        rf"\b(?:target|label)(?:\s+(?:column|field))?\s*(?:is|:|=)\s*{_TARGET_NAME_QUALIFIER}{_COLUMN_TOKEN}",
         re.IGNORECASE,
     ),
     re.compile(
         rf"\b(?:in|from)\s+(?:the\s+)?{_COLUMN_TOKEN}\s+column\b",
         re.IGNORECASE,
     ),
+)
+_USE_TARGET_TO_PREDICT = re.compile(
+    r"^use\s+(?:the\s+)?(.+?)\s+to\s+predict$",
+    re.IGNORECASE,
 )
 
 
@@ -54,17 +63,21 @@ def extract_target_reference(text: str) -> dict[str, Any]:
                 "explicit_target_column": True,
             }
 
-    match = re.match(rf"^(?:{_TARGET_VERBS})\s+(.+)$", request, re.IGNORECASE)
-    if match is not None:
-        # Keep the phrase after the action verb and remove dataset context.
-        target = _DATASET_CONTEXT.sub("", match.group(1)).strip()
-        target = re.sub(r"^the\s+", "", target, flags=re.IGNORECASE).strip()
-    elif _QUESTION_START.match(request) or _WH_QUESTION_START.match(request):
-        target = request
-    elif re.search(r"\blikely\s+to\b", request, re.IGNORECASE):
-        target = request
+    use_target_match = _USE_TARGET_TO_PREDICT.match(request)
+    if use_target_match is not None:
+        target = use_target_match.group(1).strip()
     else:
-        return _no_target_result()
+        match = re.match(rf"^(?:{_TARGET_VERBS})\s+(.+)$", request, re.IGNORECASE)
+        if match is not None:
+        # Keep the phrase after the action verb and remove dataset context.
+            target = _DATASET_CONTEXT.sub("", match.group(1)).strip()
+            target = re.sub(r"^the\s+", "", target, flags=re.IGNORECASE).strip()
+        elif _QUESTION_START.match(request) or _WH_QUESTION_START.match(request):
+            target = request
+        elif re.search(r"\blikely\s+to\b", request, re.IGNORECASE):
+            target = request
+        else:
+            return _no_target_result()
 
     if (
         not target

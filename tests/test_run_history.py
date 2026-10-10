@@ -128,3 +128,42 @@ def test_legacy_history_records_without_meta_features_remain_compatible(tmp_path
     assert record["meta_features"]["target_problem_type"] == "Regression"
     assert comparison["status"] == "improved"
     json.dumps(history, allow_nan=False)
+
+
+def test_run_history_persists_optional_optimizer_decision_and_keeps_legacy_records(tmp_path):
+    history_path = tmp_path / "training_history.json"
+    legacy_record = {"run_id": "legacy", "dataset": "course.csv", "metric_value": 0.5}
+    history_path.write_text(json.dumps([legacy_record]) + "\n", encoding="utf-8")
+    decision = {
+        "requested_mode": "auto",
+        "selected_strategy": "random",
+        "trial_budget": 3,
+        "reason": "Bounded medium-workload search.",
+        "tuning_duration_seconds": 0.25,
+        "workload": {"candidate_model_count": 3, "cv_folds": 5},
+    }
+    dataframe = pd.DataFrame({"target": [0, 1, 0, 1], "feature": [1, 2, 3, 4]})
+    training_output = {
+        "model": {"model_id": "auto_run"},
+        "target_column": "target",
+        "problem_type": "Binary Classification",
+        "best_model": {
+            "name": "DecisionTreeClassifier",
+            "selection_metric": "f1_score",
+            "metrics": {"f1_score": 0.75},
+        },
+        "tuning": decision,
+    }
+
+    record, _ = run_history.record_training_run(
+        dataframe,
+        training_output,
+        dataset_name="course.csv",
+        history_path=history_path,
+    )
+
+    history = json.loads(history_path.read_text(encoding="utf-8"))
+    assert history[0] == legacy_record
+    assert record["optimizer_decision"] == decision
+    assert history[1]["optimizer_decision"]["selected_strategy"] == "random"
+    json.dumps(history, allow_nan=False)
