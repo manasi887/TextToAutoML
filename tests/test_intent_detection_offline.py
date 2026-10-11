@@ -30,8 +30,12 @@ class FakeModel:
         return SimpleNamespace(logits=torch.tensor([[0.1, 2.0, 0.2, -0.5]]))
 
 
-def test_prediction_loads_local_artifacts_without_network(tmp_path):
-    (tmp_path / "label_mapping.json").write_text(
+def _write_minimal_model_artifacts(model_dir: Path) -> None:
+    (model_dir / "config.json").write_text("{}", encoding="utf-8")
+    (model_dir / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+    (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+    (model_dir / "model.safetensors").write_bytes(b"weights")
+    (model_dir / "label_mapping.json").write_text(
         json.dumps(
             {
                 "id_to_label": {
@@ -44,6 +48,10 @@ def test_prediction_loads_local_artifacts_without_network(tmp_path):
         ),
         encoding="utf-8",
     )
+
+
+def test_prediction_loads_local_artifacts_without_network(tmp_path):
+    _write_minimal_model_artifacts(tmp_path)
     intent_detection.MODEL_DIR = tmp_path
     intent_detection._tokenizer = None
     intent_detection._model = None
@@ -100,19 +108,7 @@ def test_prediction_uses_persisted_temperature_for_calibration(tmp_path):
         def __call__(self, **inputs):
             return SimpleNamespace(logits=torch.tensor([[2.0, 0.0, 0.0, 0.0]]))
 
-    (tmp_path / "label_mapping.json").write_text(
-        json.dumps(
-            {
-                "id_to_label": {
-                    "0": "classification",
-                    "1": "regression",
-                    "2": "clustering",
-                    "3": "unknown",
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
+    _write_minimal_model_artifacts(tmp_path)
     (tmp_path / "temperature.json").write_text(
         json.dumps({"temperature": 2.0}),
         encoding="utf-8",

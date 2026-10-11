@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TextToAutoML Architecture</title>
+  <style>
+    :root { color-scheme: light; font-family: Georgia, "Times New Roman", serif; color: #202b32; }
+    * { box-sizing: border-box; }
+    body { max-width: 920px; margin: 0 auto; padding: 38px 46px; font-size: 11pt; line-height: 1.45; }
+    h1, h2, h3 { font-family: "Segoe UI", Arial, sans-serif; color: #173d4a; }
+    h1 { margin: 0 0 5px; font-size: 30pt; }
+    h2 { margin: 25px 0 9px; border-bottom: 1px solid #9bb4b9; padding-bottom: 4px; font-size: 17pt; }
+    h3 { margin: 13px 0 4px; font-size: 12pt; }
+    p { margin: 6px 0 10px; }
+    .subtitle { color: #52656c; font: 12pt "Segoe UI", Arial, sans-serif; }
+    .flow { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap: 9px; align-items: center; margin: 18px 0; }
+    .box { border: 1px solid #6f9298; border-top: 4px solid #287b78; border-radius: 4px; padding: 11px; background: #f2f7f5; min-height: 92px; }
+    .box strong { display: block; font: 700 11pt "Segoe UI", Arial, sans-serif; margin-bottom: 4px; }
+    .arrow { color: #287b78; font: 18pt "Segoe UI", Arial, sans-serif; }
+    table { width: 100%; border-collapse: collapse; margin: 8px 0 14px; font-size: 10pt; }
+    th, td { text-align: left; vertical-align: top; border: 1px solid #bdcbcd; padding: 6px 8px; }
+    th { background: #e6efed; font: 700 9.5pt "Segoe UI", Arial, sans-serif; }
+    code { font: 9pt Consolas, "Courier New", monospace; color: #173d4a; }
+    .band { background: #eef4f2; border-left: 4px solid #287b78; padding: 9px 12px; margin: 10px 0; }
+    .small { color: #52656c; font-size: 9.5pt; }
+    .page-break { break-before: page; }
+    @media print {
+      body { max-width: none; padding: 0; font-size: 10pt; }
+      h2 { break-after: avoid; }
+      table, .flow, .box, .band { break-inside: avoid; }
+      .page-break { break-before: page; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>TextToAutoML</h1>
+    <p class="subtitle">System architecture | Repository-grounded component and deployment view</p>
+    <p>This document describes the implemented frontend, FastAPI services, model flows, filesystem persistence, and production routing in this repository. It distinguishes the tabular AutoML pipeline from the separate image-classification pipeline.</p>
+  </header>
+
+  <h2>Request and Routing Architecture</h2>
+  <div class="flow">
+    <div class="box"><strong>React frontend</strong><code>frontend/src/App.jsx</code><br>Uploads datasets, gathers task intent, displays results, and sends prediction requests using same-origin paths.</div>
+    <div class="arrow">&#8594;</div>
+    <div class="box"><strong>Nginx production frontend</strong><code>Dockerfile.frontend</code>, <code>nginx.conf</code><br>Serves the Vite production bundle and reverse-proxies API paths to the backend service.</div>
+    <div class="arrow">&#8594;</div>
+    <div class="box"><strong>FastAPI application</strong><code>backend/main.py</code><br>Registers API routers, CORS, liveness, and model-aware readiness.</div>
+  </div>
+
+  <table>
+    <thead><tr><th>Route group</th><th>Implemented responsibility</th><th>Primary code</th></tr></thead>
+    <tbody>
+      <tr><td><code>/upload/</code></td><td>Accepts tabular datasets and stores uploaded files.</td><td><code>backend/api/upload.py</code></td></tr>
+      <tr><td><code>/nlp/analyze</code>, <code>/nlp/train</code>, <code>/nlp/diagnose-target-proxies</code></td><td>Resolves a natural-language task and target; optionally trains or diagnoses target leakage.</td><td><code>backend/api/nlp.py</code></td></tr>
+      <tr><td><code>/nlp/route</code></td><td>Routes requests between supported workflow intents, including image workflows.</td><td><code>backend/api/nlp_routing.py</code></td></tr>
+      <tr><td><code>/train/</code>, <code>/predict/</code></td><td>Direct tabular training and persisted-model prediction.</td><td><code>backend/api/train.py</code>, <code>backend/api/predict.py</code></td></tr>
+      <tr><td><code>/image/analyze</code>, <code>/image/train</code>, <code>/image/predict</code></td><td>Image ZIP inspection, image-classifier training, and single-image prediction.</td><td><code>backend/api/image_classification.py</code></td></tr>
+      <tr><td><code>/health</code>, <code>/ready</code></td><td>Lightweight process/storage liveness and required intent-artifact readiness.</td><td><code>backend/main.py</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>Natural-Language and Model Flow</h2>
+  <div class="band"><strong>Intent classifier:</strong> DistilBERT tokenizer and sequence-classification weights are loaded from the single configured <code>INTENT_MODEL_DIR</code>. Its label mapping is stored beside the weights. Readiness checks artifact structure without initializing model weights; request-time loading reports a typed unavailable error.</div>
+  <p>The NLP pipeline runs intent detection, confidence/clarification analysis, explicit task mapping, target extraction, and dataset resolution. Strong lexical target matches can resolve without semantic models. When semantic comparison is needed, target matching uses a local embedding model and a cross-encoder reranker with local-only loading.</p>
+  <div class="flow">
+    <div class="box"><strong>Intent</strong>DistilBERT classification, confidence, and clarification.</div>
+    <div class="arrow">&#8594;</div>
+    <div class="box"><strong>Target resolution</strong>Extraction, lexical scoring, and optional embedding/reranker matching.</div>
+    <div class="arrow">&#8594;</div>
+    <div class="box"><strong>Confirmed task</strong>Dataset resolution and optional training-time estimate.</div>
+  </div>
+  <p class="small">Model names are configurable as <code>TARGET_EMBEDDING_MODEL</code> and <code>TARGET_RERANKER_MODEL</code>. These semantic dependencies are optional for application readiness, but an NLP request that requires unavailable semantic matching returns HTTP 503.</p>
+
+  <div class="page-break"></div>
+  <h2>Tabular AutoML</h2>
+  <p>The direct training route and NLP integration both call the existing tabular AutoML orchestration. CPU-bound training work is dispatched from async API handlers with worker threads so liveness requests remain serviceable.</p>
+  <div class="flow">
+    <div class="box"><strong>Dataset preparation</strong>Load, validate, select features, and prepare target/group columns.</div>
+    <div class="arrow">&#8594;</div>
+    <div class="box"><strong>Train and evaluate</strong>Split train/validation/test data, preprocess, train candidates, tune where requested, and compare validation metrics.</div>
+    <div class="arrow">&#8594;</div>
+    <div class="box"><strong>Select and persist</strong>Choose the best candidate, refit as implemented, report holdout metrics, and save the model package.</div>
+  </div>
+  <p>Candidate orchestration and evaluation live under <code>backend/services/automl</code>. The selected estimator and reconstruction metadata are persisted as a Joblib package under <code>storage/models</code>; prediction reloads that package through the persistence service. NLP training can additionally record run comparisons in <code>storage/reports/training_history.json</code>.</p>
+
+  <h2>Image Classification</h2>
+  <p>Image classification is a separate PyTorch workflow, not part of tabular AutoML. The API accepts a ZIP dataset, extracts and analyzes its class folders and any predefined splits, then trains the implemented MobileNetV2 classifier on train/validation/test partitions.</p>
+  <div class="flow">
+    <div class="box"><strong>Image dataset</strong>ZIP extraction, class mapping, split analysis, and image validation.</div>
+    <div class="arrow">&#8594;</div>
+    <div class="box"><strong>MobileNetV2</strong>Image transforms, training, validation, and held-out test evaluation.</div>
+    <div class="arrow">&#8594;</div>
+    <div class="box"><strong>Image package</strong>PyTorch state dictionary plus JSON manifest with architecture, classes, preprocessing, and metrics.</div>
+  </div>
+  <p>Image training and prediction code is under <code>backend/services/image_classification</code>. Packages are stored under <code>storage/image_models</code>; the manifest is used to reconstruct the classifier and class ordering for prediction.</p>
+
+  <h2>Storage and Production Deployment</h2>
+  <table>
+    <thead><tr><th>Path / setting</th><th>Contents or role</th></tr></thead>
+    <tbody>
+      <tr><td><code>storage/uploads</code></td><td>Uploaded tabular datasets.</td></tr>
+      <tr><td><code>storage/models</code></td><td>Joblib tabular model packages.</td></tr>
+      <tr><td><code>storage/image_models</code></td><td>Image model weights and manifests.</td></tr>
+      <tr><td><code>INTENT_MODEL_DIR</code></td><td>Trained DistilBERT inference artifacts; shared by training, serving, and readiness.</td></tr>
+      <tr><td><code>HF_CACHE_DIR</code></td><td>Host-mounted Hugging Face cache used for local semantic target-matching models.</td></tr>
+      <tr><td><code>storage/reports/training_history.json</code></td><td>Training run history and comparison metadata.</td></tr>
+    </tbody>
+  </table>
+  <p>Compose builds a Python backend image and a separate multi-stage frontend image. The frontend image builds the Vite bundle and serves it through Nginx; Nginx forwards same-origin API paths to the Compose backend service. The backend image installs application requirements from PyPI and also configures the PyTorch CPU wheel index for CPU builds.</p>
+  <p><code>/health</code> checks service liveness without loading models. <code>/ready</code> requires uploads storage and structurally complete intent-classifier artifacts; semantic matching models are reported as optional and are loaded only when needed.</p>
+  <p class="small">Source map: <code>backend/api</code>, <code>backend/services</code>, <code>frontend/src</code>, <code>Dockerfile</code>, <code>Dockerfile.frontend</code>, <code>docker-compose.yml</code>, and <code>nginx.conf</code>.</p>
+</body>
+</html>

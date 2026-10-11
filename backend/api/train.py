@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from typing import Any, Literal
 
@@ -207,7 +208,8 @@ async def train_dataset(request: TrainRequest):
                 "tuning_strategy": request.tuning_strategy,
                 "tuning_trials": request.tuning_trials,
             }
-        pipeline_result = run_automl_pipeline(
+        pipeline_result = await asyncio.to_thread(
+            run_automl_pipeline,
             df,
             target_column=target_column,
             group_column=request.group_column,

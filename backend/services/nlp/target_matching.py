@@ -37,6 +37,25 @@ _MULTI_CLASS_REQUEST_TERMS = {"which", "belongs", "category", "class", "type", "
 _MODEL_LOCK = threading.Lock()
 _MODEL_COMPONENTS: tuple[Any, ...] | None = None
 _MODEL_LOAD_FAILED = False
+_MODEL_DEPENDENCY_MESSAGE = (
+    "The target-matching embedding and reranker models are unavailable. "
+    f"Install or download {TARGET_EMBEDDING_MODEL} and {TARGET_RERANKER_MODEL} "
+    "to the local cache before retrying."
+)
+
+
+class ModelDependencyError(RuntimeError):
+    """Raised when the local semantic target-matching models are unavailable."""
+
+
+def model_dependency_status() -> str:
+    """Report optional semantic-model state without triggering model loading."""
+    if _MODEL_COMPONENTS is not None:
+        return "available"
+    if _MODEL_LOAD_FAILED:
+        return "unavailable"
+    return "not_loaded"
+
 
 # Common stopwords and filler phrases to remove from natural language targets
 _STOPWORDS = {
@@ -118,13 +137,13 @@ def _load_local_models() -> tuple[Any, ...] | None:
     if _MODEL_COMPONENTS is not None:
         return _MODEL_COMPONENTS
     if _MODEL_LOAD_FAILED:
-        return None
+        raise ModelDependencyError(_MODEL_DEPENDENCY_MESSAGE)
 
     with _MODEL_LOCK:
         if _MODEL_COMPONENTS is not None:
             return _MODEL_COMPONENTS
         if _MODEL_LOAD_FAILED:
-            return None
+            raise ModelDependencyError(_MODEL_DEPENDENCY_MESSAGE)
         try:
             import torch
             from transformers import (
@@ -158,9 +177,9 @@ def _load_local_models() -> tuple[Any, ...] | None:
                 reranker_tokenizer,
                 reranker_model,
             )
-        except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError):
+        except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
             _MODEL_LOAD_FAILED = True
-            return None
+            raise ModelDependencyError(_MODEL_DEPENDENCY_MESSAGE) from exc
     return _MODEL_COMPONENTS
 
 

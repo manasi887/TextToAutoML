@@ -12,6 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from main import app
 from services.automl.trainer import split_dataset_train_validation_test
+from services.nlp.intent_detection import IntentModelUnavailableError
+from services.nlp.target_matching import ModelDependencyError
 
 
 def _uses_real_intent_model(test_method):
@@ -405,6 +407,99 @@ class NlpApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("invalid NLP request", response.json()["detail"])
+
+    def test_model_dependency_failures_return_specific_503_for_every_nlp_flow(self):
+        dataset_name = "nlp_model_dependency_errors.csv"
+        self._write_dataset(
+            dataset_name,
+            {"target": [0, 1, 0, 1], "feature": [1, 2, 3, 4]},
+        )
+        endpoints = (
+            "/nlp/analyze",
+            "/nlp/train",
+            "/nlp/diagnose-target-proxies",
+        )
+        failures = (
+            (
+                IntentModelUnavailableError("missing at C:\\private\\intent"),
+                "intent_classifier",
+                "intent_model_unavailable",
+            ),
+            (
+                ModelDependencyError("missing local embedding and reranker"),
+                "target_matching",
+                "target_matching_models_unavailable",
+            ),
+        )
+
+        for error, capability, code in failures:
+            for endpoint in endpoints:
+                with self.subTest(endpoint=endpoint, capability=capability), patch(
+                    "api.nlp.process_nlp_request", side_effect=error
+                ):
+                    response = self.client.post(
+                        endpoint,
+                        json={"filename": dataset_name, "text": "Predict target"},
+                    )
+
+                self.assertEqual(response.status_code, 503)
+                detail = response.json()["detail"]
+                self.assertEqual(detail["code"], code)
+                self.assertEqual(detail["capability"], capability)
+                self.assertNotIn("C:\\private", response.text)
+
+    def test_invalid_nlp_input_returns_400_for_every_nlp_flow(self):
+        dataset_name = "nlp_invalid_input_errors.csv"
+        self._write_dataset(
+            dataset_name,
+            {"target": [0, 1, 0, 1], "feature": [1, 2, 3, 4]},
+        )
+
+        for endpoint in (
+            "/nlp/analyze",
+            "/nlp/train",
+            "/nlp/diagnose-target-proxies",
+        ):
+            with self.subTest(endpoint=endpoint), patch(
+                "api.nlp.process_nlp_request",
+                side_effect=ValueError("invalid NLP request"),
+            ):
+                response = self.client.post(
+                    endpoint,
+                    json={"filename": dataset_name, "text": "Predict target"},
+                )
+
+            self.assertEqual(response.status_code, 400)
+
+    def test_unexpected_nlp_failures_return_safe_500_and_are_logged(self):
+        dataset_name = "nlp_internal_error.csv"
+        self._write_dataset(
+            dataset_name,
+            {"target": [0, 1, 0, 1], "feature": [1, 2, 3, 4]},
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+
+        for endpoint in (
+            "/nlp/analyze",
+            "/nlp/train",
+            "/nlp/diagnose-target-proxies",
+        ):
+            with self.subTest(endpoint=endpoint), self.assertLogs(
+                "api.nlp", level="ERROR"
+            ), patch(
+                "api.nlp.process_nlp_request",
+                side_effect=RuntimeError("internal failure at C:\\private\\trace"),
+            ):
+                response = client.post(
+                    endpoint,
+                    json={"filename": dataset_name, "text": "Predict target"},
+                )
+
+            self.assertEqual(response.status_code, 500)
+            self.assertEqual(
+                response.json()["detail"], "The NLP request could not be completed."
+            )
+            self.assertNotIn("C:\\private", response.text)
 
     def test_clarification_loop_blocks_then_trains_after_clarification(self):
         dataset_name = "nlp_clarification_loop.csv"

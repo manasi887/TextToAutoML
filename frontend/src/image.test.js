@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -8,6 +7,7 @@ import {
   routeImageRequest,
   trainImageModel,
 } from "./image.js";
+import viteConfig, { resolveApiBase } from "../vite.config.js";
 
 function namedBlob(name, type) {
   const file = new Blob(["image data"], { type });
@@ -238,11 +238,25 @@ test("successful empty response is reported without a JSON parser exception", as
   );
 });
 
-test("Vite proxies image API requests to the existing backend", async () => {
-  const viteConfig = await readFile(new URL("../vite.config.js", import.meta.url), "utf8");
+test("Vite proxy uses VITE_API_BASE and falls back to port 8000", async () => {
+  const originalApiBase = process.env.VITE_API_BASE;
+  try {
+    delete process.env.VITE_API_BASE;
+    const fallbackConfig = await viteConfig({ mode: "test" });
+    const fallback = "http://127.0.0.1:8000";
+    assert.equal(resolveApiBase({}), fallback);
+    for (const route of ["/upload", "/nlp", "/train", "/predict", "/image"]) {
+      assert.equal(fallbackConfig.server.proxy[route], fallback);
+    }
 
-  assert.match(viteConfig, /"\/image":\s*"http:\/\/127\.0\.0\.1:8001"/);
-  for (const route of ["/upload", "/nlp", "/train", "/predict"]) {
-    assert.match(viteConfig, new RegExp(`"${route}":\\s*"http://127\\.0\\.0\\.1:8001"`));
+    process.env.VITE_API_BASE = "http://backend:8000";
+    const environmentConfig = await viteConfig({ mode: "test" });
+    assert.equal(resolveApiBase({ VITE_API_BASE: "http://backend:8000" }), "http://backend:8000");
+    for (const route of ["/upload", "/nlp", "/train", "/predict", "/image"]) {
+      assert.equal(environmentConfig.server.proxy[route], "http://backend:8000");
+    }
+  } finally {
+    if (originalApiBase === undefined) delete process.env.VITE_API_BASE;
+    else process.env.VITE_API_BASE = originalApiBase;
   }
 });

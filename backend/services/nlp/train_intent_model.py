@@ -9,10 +9,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+
+from config import INTENT_MODEL_DIR
+
 DATASET_PATH = Path(__file__).resolve().parent / "data" / "intent_dataset.csv"
-OUTPUT_DIR = (
-    Path(__file__).resolve().parents[2] / "storage" / "nlp_models" / "intent_classifier"
-)
+OUTPUT_DIR = INTENT_MODEL_DIR
 MODEL_NAME = "distilbert-base-uncased"
 MAX_LENGTH = 128
 NUM_LABELS = 4

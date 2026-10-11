@@ -1,13 +1,28 @@
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 
-export default defineConfig({
-  server: {
-    proxy: {
-      "/upload": "http://127.0.0.1:8001",
-      "/nlp": "http://127.0.0.1:8001",
-      "/train": "http://127.0.0.1:8001",
-      "/predict": "http://127.0.0.1:8001",
-      "/image": "http://127.0.0.1:8001",
+export function resolveApiBase(env) {
+  return env.VITE_API_BASE || "http://127.0.0.1:8000";
+}
+
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), "");
+  const apiBase = resolveApiBase(env);
+
+  return {
+    server: {
+      host: "0.0.0.0",
+      port: 5173,
+      proxy: {
+        "/upload": apiBase,
+        "/nlp": apiBase,
+        "/train": apiBase,
+        "/predict": apiBase,
+        "/image": apiBase,
+      },
     },
-  },
+    preview: {
+      host: "0.0.0.0",
+      port: 4173,
+    },
+  };
 });

@@ -20,3 +20,8 @@ storage/image_models/
 # Temporary local test and diagnostic files
 iris_test.csv
 warnings_log.txt
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example

@@ -1,3 +1,4 @@
+import asyncio
 import shutil
 import tempfile
 from pathlib import Path
@@ -147,7 +148,8 @@ async def train_image_dataset(
                 validation_ratio=validation_ratio,
                 test_ratio=test_ratio,
             )
-        training_result = train_image_classifier(
+        training_result = await asyncio.to_thread(
+            train_image_classifier,
             extracted_root,
             class_to_index=summary["class_to_index"],
             split=split,
