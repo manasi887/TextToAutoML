@@ -212,12 +212,14 @@ export default function App() {
   const tabularWorkflowRequestRef = useRef(0);
   const imageTrainingRequestRef = useRef(0);
   const imagePredictionRequestRef = useRef(0);
+  const imagePredictionInFlightRef = useRef(null);
   const [predictionState, setPredictionState] = useState("idle");
   const [predictionError, setPredictionError] = useState("");
   const [predictionMode, setPredictionMode] = useState("sample");
   const [predictionInputs, setPredictionInputs] = useState({});
   const [predictionResult, setPredictionResult] = useState(null);
   const [imageZipFile, setImageZipFile] = useState(null);
+  const [imageZipValidationError, setImageZipValidationError] = useState("");
   const [imageRoutingState, setImageRoutingState] = useState("idle");
   const [imageRoutingError, setImageRoutingError] = useState("");
   const [imageRoutingResult, setImageRoutingResult] = useState(null);
@@ -230,6 +232,9 @@ export default function App() {
   const [imageTrainingError, setImageTrainingError] = useState("");
   const [imageTrainingResult, setImageTrainingResult] = useState(null);
   const [imageModelId, setImageModelId] = useState("");
+  const [imageModelSource, setImageModelSource] = useState("none");
+  const [existingImageModelIdInput, setExistingImageModelIdInput] = useState("");
+  const [existingImageModelIdError, setExistingImageModelIdError] = useState("");
   const [imagePredictionFile, setImagePredictionFile] = useState(null);
   const [imagePredictionState, setImagePredictionState] = useState("idle");
   const [imagePredictionError, setImagePredictionError] = useState("");
@@ -415,6 +420,7 @@ export default function App() {
     clearImageRouting();
     clearImageAnalysis();
     setImagePredictionFile(null);
+    imagePredictionInFlightRef.current = null;
     setImagePredictionState("idle");
     setImagePredictionError("");
     setImagePredictionResult(null);
@@ -504,19 +510,20 @@ export default function App() {
   async function handleImageDatasetChange(event) {
     const file = event.target.files?.[0];
     if (!file || datasetType !== "image") return;
+    if (!file.name.toLowerCase().endsWith(".zip")) {
+      setImageZipFile(null);
+      setImageZipValidationError("Choose a ZIP file containing class folders of images.");
+      clearImageRouting();
+      return;
+    }
 
     imageTrainingRequestRef.current += 1;
-    imagePredictionRequestRef.current += 1;
     setImageZipFile(file);
+    setImageZipValidationError("");
     resetImageDatasetWorkflow({
       setImageTrainingState,
       setImageTrainingError,
       setImageTrainingResult,
-      setImageModelId,
-      setImagePredictionFile,
-      setImagePredictionState,
-      setImagePredictionError,
-      setImagePredictionResult,
     });
     clearImageRouting();
     clearImageAnalysis();
@@ -542,6 +549,24 @@ export default function App() {
     clearImageAnalysis();
   }
 
+  function useExistingImageModel() {
+    const modelId = existingImageModelIdInput.trim();
+    if (!modelId) {
+      setExistingImageModelIdError("Enter a trained image model ID to continue.");
+      return;
+    }
+    imagePredictionRequestRef.current += 1;
+    imagePredictionInFlightRef.current = null;
+    setImageModelId(modelId);
+    setImageModelSource("existing");
+    setExistingImageModelIdInput("");
+    setExistingImageModelIdError("");
+    setImagePredictionState("idle");
+    setImagePredictionError("");
+    setImagePredictionResult(null);
+    clearImageRouting();
+  }
+
   async function handleImageRoute() {
     const text = task.trim();
     if (!text) {
@@ -552,9 +577,11 @@ export default function App() {
     }
 
     const refersToSingleImage = /\b(?:this|that|single)\s+(?:image|photo|picture)\b/i.test(text);
-    const assetType = imagePredictionFile || refersToSingleImage || (!imageZipFile && (imageModelId || imageTrainingResult))
-      ? "image"
-      : "image_dataset";
+    const assetType = imageZipFile
+      ? "image_dataset"
+      : imagePredictionFile || refersToSingleImage || imageModelId || imageTrainingResult
+        ? "image"
+        : "image_dataset";
     const requestId = ++imageRoutingRequestRef.current;
     clearImageAnalysis();
     setImageRoutingState("loading");
@@ -606,11 +633,17 @@ export default function App() {
   }
 
   async function startImageTraining() {
+    const currentRoute =
+      imageRoutingState === "success" && imageRoutedText === task.trim();
+    const explicitTrainingReady =
+      imageRoutingResult?.intent === "IMAGE_TRAINING_REQUEST" &&
+      imageRoutingResult.ready;
+    const bothImageInputsSelected = Boolean(imageZipFile && imagePredictionFile);
     if (
       datasetType !== "image" ||
-      imageRoutingResult?.intent !== "IMAGE_TRAINING_REQUEST" ||
-      !imageRoutingResult.ready ||
-      imageRoutedText !== task.trim() ||
+      imageTrainingState === "loading" ||
+      !currentRoute ||
+      (!explicitTrainingReady && !bothImageInputsSelected) ||
       !imageZipFile
     ) {
       return;
@@ -619,8 +652,6 @@ export default function App() {
     setImageTrainingState("loading");
     setImageTrainingError("");
     setImageTrainingResult(null);
-    setImageModelId("");
-    setImagePredictionFile(null);
     setImagePredictionState("idle");
     setImagePredictionError("");
     setImagePredictionResult(null);
@@ -629,8 +660,12 @@ export default function App() {
     try {
       const payload = await trainImageModel(imageZipFile);
       if (requestId !== imageTrainingRequestRef.current) return;
+      if (typeof payload.model_id !== "string" || !payload.model_id.trim()) {
+        throw new Error("Training completed without returning a model ID.");
+      }
       setImageTrainingResult(payload);
-      setImageModelId(payload.model_id || "");
+      setImageModelId(payload.model_id.trim());
+      setImageModelSource("trained");
       setImageTrainingState("success");
     } catch (error) {
       if (requestId !== imageTrainingRequestRef.current) return;
@@ -640,27 +675,26 @@ export default function App() {
   }
 
   async function handleImagePredict() {
-    if (
-      datasetType !== "image" ||
-      imageRoutingResult?.intent !== "IMAGE_PREDICTION" ||
-      !imageRoutingResult.ready ||
-      imageRoutedText !== task.trim()
-    ) {
+    if (datasetType !== "image" || imagePredictionInFlightRef.current !== null) return;
+    if (!imageModelId.trim()) {
+      setImagePredictionState("error");
+      setImagePredictionError("Enter a trained image model ID before predicting.");
       return;
     }
-    if (!imageModelId || !imagePredictionFile) {
+    if (!imagePredictionFile) {
       setImagePredictionState("error");
-      setImagePredictionError("Choose a single image and a trained image model before predicting.");
+      setImagePredictionError("Choose a single image before predicting.");
       return;
     }
 
+    const requestId = ++imagePredictionRequestRef.current;
+    imagePredictionInFlightRef.current = requestId;
     setImagePredictionState("loading");
     setImagePredictionError("");
     setImagePredictionResult(null);
-    const requestId = ++imagePredictionRequestRef.current;
 
     try {
-      const payload = await predictImageModel(imageModelId, imagePredictionFile);
+      const payload = await predictImageModel(imageModelId.trim(), imagePredictionFile);
       if (requestId !== imagePredictionRequestRef.current) return;
       setImagePredictionResult(payload);
       setImagePredictionState("success");
@@ -668,6 +702,10 @@ export default function App() {
       if (requestId !== imagePredictionRequestRef.current) return;
       setImagePredictionState("error");
       setImagePredictionError(error.message || "Image prediction failed. Please try again.");
+    } finally {
+      if (imagePredictionInFlightRef.current === requestId) {
+        imagePredictionInFlightRef.current = null;
+      }
     }
   }
 
@@ -2684,6 +2722,16 @@ export default function App() {
                 style={{ display: "none" }}
               />
             </label>
+            {imageZipValidationError && (
+              <p role="alert" style={{ margin: "8px 0 0", color: "#a13d35", font: "14px/1.5 Arial, sans-serif" }}>
+                {imageZipValidationError}
+              </p>
+            )}
+            {imageZipFile && (
+              <p role="status" style={{ margin: "8px 0 0", color: "#526158", font: "14px/1.5 Arial, sans-serif" }}>
+                Selected ZIP: {imageZipFile.name}. Archive contents are checked before training starts.
+              </p>
+            )}
 
             <label htmlFor="image-prediction-upload" style={{ display: "block", margin: "18px 0 8px", color: "#526158", font: "14px Arial, sans-serif" }}>
               Single image for prediction
@@ -2693,6 +2741,8 @@ export default function App() {
               type="file"
               accept=".jpg,.jpeg,.png,.bmp,.webp"
               onChange={(event) => {
+                imagePredictionRequestRef.current += 1;
+                imagePredictionInFlightRef.current = null;
                 setImagePredictionFile(event.target.files?.[0] || null);
                 setImagePredictionState("idle");
                 setImagePredictionError("");
@@ -2744,25 +2794,29 @@ export default function App() {
                     Required: {imageRoutingResult.required_context.map((item) => imageContextLabels[item] || item).join(", ")}.
                   </p>
                 )}
-                {imageRoutingResult.intent === "IMAGE_TRAINING_REQUEST" && imageRoutingResult.ready && (
-                  <button
-                    type="button"
-                    onClick={startImageTraining}
-                    disabled={imageTrainingState === "loading" || !imageZipFile || imageRoutedText !== task.trim()}
-                    style={{ display: "block", marginTop: "14px", padding: "11px 18px", border: 0, borderRadius: "6px", background: imageTrainingState === "loading" ? "#7f9a89" : "#1e6041", color: "#ffffff", cursor: imageTrainingState === "loading" ? "wait" : "pointer", font: "600 14px Arial, sans-serif" }}
-                  >
-                    {imageTrainingState === "loading" ? "Training image classifier..." : "Start Image Training"}
-                  </button>
-                )}
-                {imageRoutingResult.intent === "IMAGE_PREDICTION" && imageRoutingResult.ready && (
-                  <button
-                    type="button"
-                    onClick={handleImagePredict}
-                    disabled={imagePredictionState === "loading" || imageRoutedText !== task.trim()}
-                    style={{ display: "block", marginTop: "14px", padding: "11px 18px", border: 0, borderRadius: "6px", background: imagePredictionState === "loading" ? "#7f9a89" : "#1e6041", color: "#ffffff", cursor: imagePredictionState === "loading" ? "wait" : "pointer", font: "600 14px Arial, sans-serif" }}
-                  >
-                    {imagePredictionState === "loading" ? "Predicting..." : "Run Image Prediction"}
-                  </button>
+                {imageZipFile &&
+                  ((imageRoutingResult.intent === "IMAGE_TRAINING_REQUEST" && imageRoutingResult.ready) || imagePredictionFile) && (
+                    <div style={{ marginTop: "14px", paddingTop: "12px", borderTop: "1px solid #dbe5de" }}>
+                      <p style={{ margin: 0, color: "#526158" }}>
+                        Training dataset: <strong>{imageZipFile.name}</strong>
+                      </p>
+                      {imagePredictionFile && (
+                        <p style={{ margin: "6px 0 0", color: "#526158" }}>
+                          Both inputs are selected. Choose Train Image Model or use the separate prediction action below.
+                        </p>
+                      )}
+                      <button
+                        type="button"
+                        onClick={startImageTraining}
+                        disabled={imageTrainingState === "loading" || imageRoutedText !== task.trim()}
+                        style={{ display: "block", marginTop: "12px", padding: "11px 18px", border: 0, borderRadius: "6px", background: imageTrainingState === "loading" ? "#7f9a89" : "#1e6041", color: "#ffffff", cursor: imageTrainingState === "loading" ? "wait" : "pointer", font: "600 14px Arial, sans-serif" }}
+                      >
+                        {imageTrainingState === "loading" ? "Training image classifier..." : "Train Image Model"}
+                      </button>
+                    </div>
+                  )}
+                {imageTrainingError && imageTrainingState === "error" && (
+                  <p role="alert" style={{ margin: "10px 0 0", color: "#a13d35" }}>{imageTrainingError}</p>
                 )}
                 {imageRoutingResult.intent === "IMAGE_TRAINING_REPORT" && imageRoutingResult.ready && imageTrainingResult && (
                   <p style={{ margin: "10px 0 0", color: "#526158" }}>The current image training result is displayed below.</p>
@@ -2997,12 +3051,82 @@ export default function App() {
               </section>
             )}
 
-            {imageModelId && (
-              <section aria-label="Image prediction" style={{ marginTop: "24px", paddingTop: "18px", borderTop: "1px solid #edf2ee" }}>
+            {imageModelSource === "none" && (
+              <section aria-label="Use existing image model" style={{ marginTop: "24px", paddingTop: "18px", borderTop: "1px solid #edf2ee" }}>
+                <h3 style={{ margin: "0 0 10px", fontSize: "18px", fontWeight: 600 }}>Use an existing image model</h3>
+                <label htmlFor="existing-image-model-id" style={{ display: "block", marginBottom: "6px", color: "#526158", font: "14px Arial, sans-serif" }}>
+                  Trained image model ID
+                </label>
+                <input
+                  id="existing-image-model-id"
+                  type="text"
+                  value={existingImageModelIdInput}
+                  onChange={(event) => {
+                    setExistingImageModelIdInput(event.target.value);
+                    setExistingImageModelIdError("");
+                  }}
+                  placeholder="Enter an existing model ID"
+                  style={{ display: "block", width: "100%", maxWidth: "480px", boxSizing: "border-box", padding: "10px 12px", border: "1px solid #cbd8ce", borderRadius: "5px", font: "14px Arial, sans-serif" }}
+                />
+                <button
+                  type="button"
+                  onClick={useExistingImageModel}
+                  style={{ display: "block", marginTop: "10px", padding: "9px 14px", border: "1px solid #8aa294", borderRadius: "5px", background: "#ffffff", color: "#294534", cursor: "pointer", font: "600 13px Arial, sans-serif" }}
+                >
+                  Use Existing Model
+                </button>
+                {existingImageModelIdError && <p role="alert" style={{ margin: "8px 0 0", color: "#a13d35", font: "14px/1.5 Arial, sans-serif" }}>{existingImageModelIdError}</p>}
+              </section>
+            )}
+
+            {imageModelId.trim() && ["trained", "existing"].includes(imageModelSource) && (
+            <section aria-label="Image prediction" style={{ marginTop: "24px", paddingTop: "18px", borderTop: "1px solid #edf2ee" }}>
                 <h3 style={{ margin: "0 0 12px", fontSize: "18px", fontWeight: 600 }}>Test your model</h3>
-                <p style={{ margin: 0, color: "#526158", font: "14px/1.5 Arial, sans-serif" }}>
-                  Model ID: <strong>{imageModelId}</strong>
+                <p role="status" style={{ margin: "0 0 10px", color: "#526158", font: "14px/1.5 Arial, sans-serif" }}>
+                  {imageModelSource === "trained"
+                    ? imageTrainingState === "success"
+                      ? "Training succeeded. This model is ready for testing."
+                      : "Previously trained model selected. The current training attempt has not replaced it."
+                    : "Using the selected existing model. The backend will validate it during prediction."}
                 </p>
+                <label htmlFor="image-model-id" style={{ display: "block", marginBottom: "6px", color: "#526158", font: "14px Arial, sans-serif" }}>
+                  Trained image model ID
+                </label>
+                <input
+                  id="image-model-id"
+                  type="text"
+                  value={imageModelId}
+                  disabled={imagePredictionState === "loading"}
+                  onChange={(event) => {
+                    imagePredictionRequestRef.current += 1;
+                    imagePredictionInFlightRef.current = null;
+                    setImageModelId(event.target.value);
+                    setImageModelSource(event.target.value.trim() ? "existing" : "none");
+                    setImagePredictionState("idle");
+                    setImagePredictionError("");
+                    setImagePredictionResult(null);
+                    clearImageRouting();
+                  }}
+                  placeholder="Enter an existing model ID"
+                  style={{ display: "block", width: "100%", maxWidth: "480px", boxSizing: "border-box", padding: "10px 12px", border: "1px solid #cbd8ce", borderRadius: "5px", font: "14px Arial, sans-serif" }}
+                />
+                {!imageModelId.trim() && (
+                  <p role="status" style={{ margin: "8px 0 0", color: "#526158", font: "14px/1.5 Arial, sans-serif" }}>
+                    Prediction requires a trained image model. Enter an existing model ID or train the selected ZIP first.
+                  </p>
+                )}
+                <p style={{ margin: "8px 0 0", color: "#526158", font: "14px/1.5 Arial, sans-serif" }}>
+                  {imagePredictionFile ? `Selected image: ${imagePredictionFile.name}` : "Choose a single image above to predict."}
+                </p>
+                <button
+                  type="button"
+                  onClick={handleImagePredict}
+                  disabled={imagePredictionState === "loading"}
+                  style={{ display: "block", marginTop: "12px", padding: "11px 18px", border: 0, borderRadius: "6px", background: imagePredictionState === "loading" ? "#7f9a89" : "#1e6041", color: "#ffffff", cursor: imagePredictionState === "loading" ? "wait" : "pointer", font: "600 14px Arial, sans-serif" }}
+                >
+                  {imagePredictionState === "loading" ? "Predicting..." : "Predict Image"}
+                </button>
+                {imagePredictionState === "loading" && <p role="status" style={{ margin: "10px 0 0", color: "#526158", font: "14px/1.5 Arial, sans-serif" }}>Running image prediction...</p>}
                 {imagePredictionState === "error" && <p role="alert" style={{ margin: "12px 0 0", color: "#a13d35", font: "14px/1.5 Arial, sans-serif" }}>{imagePredictionError}</p>}
                 {imagePredictionState === "success" && imagePredictionResult && (
                   <div aria-label="Image prediction result" style={{ marginTop: "18px", padding: "16px", border: "1px solid #cfe0d4", borderRadius: "6px", background: "#f8fbf8", font: "14px/1.5 Arial, sans-serif" }}>

@@ -403,6 +403,22 @@ test("image ZIP selection stores the file without starting training", () => {
   assert.match(appSource, /Selecting a ZIP will not start training/);
 });
 
+test("selecting ZIP and image in either order preserves both inputs and an existing model ID", () => {
+  const zipHandler = appSource.slice(
+    appSource.indexOf("async function handleImageDatasetChange(event)"),
+    appSource.indexOf("function clearImageAnalysis()"),
+  );
+  const imageSelection = appSource.slice(
+    appSource.indexOf('id="image-prediction-upload"'),
+    appSource.indexOf("onClick={handleImageRoute}", appSource.indexOf('id="image-prediction-upload"')),
+  );
+
+  assert.match(zipHandler, /setImageZipFile\(file\)/);
+  assert.doesNotMatch(zipHandler, /setImagePredictionFile|setImageModelId/);
+  assert.match(imageSelection, /setImagePredictionFile\(event\.target\.files\?\.\[0\] \|\| null\)/);
+  assert.doesNotMatch(imageSelection, /setImageZipFile|trainImageModel|predictImageModel/);
+});
+
 test("image requests route through the shared endpoint with current context", () => {
   const routingHandler = appSource.slice(
     appSource.indexOf("async function handleImageRoute()"),
@@ -412,6 +428,7 @@ test("image requests route through the shared endpoint with current context", ()
   assert.match(appSource, /value=\{task\}[\s\S]*onChange=\{handleImageRequestChange\}/);
   assert.match(routingHandler, /routeImageRequest\(\{/);
   assert.match(routingHandler, /asset_type: assetType/);
+  assert.match(routingHandler, /const assetType = imageZipFile[\s\S]*\? "image_dataset"/);
   assert.match(routingHandler, /image_dataset_available: Boolean\(imageZipFile\)/);
   assert.match(routingHandler, /image_available: Boolean\(imagePredictionFile\)/);
   assert.match(routingHandler, /image_model_id: imageModelId \|\| null/);
@@ -429,13 +446,15 @@ test("training begins only from a fresh ready training decision and explicit but
     appSource.indexOf("async function handleImagePredict()"),
   );
 
-  assert.match(trainingHandler, /imageRoutingResult\?\.intent !== "IMAGE_TRAINING_REQUEST"/);
-  assert.match(trainingHandler, /!imageRoutingResult\.ready/);
-  assert.match(trainingHandler, /imageRoutedText !== task\.trim\(\)/);
+  assert.match(trainingHandler, /imageRoutingState === "success"/);
+  assert.match(trainingHandler, /imageTrainingState === "loading"/);
+  assert.match(trainingHandler, /imageRoutedText === task\.trim\(\)/);
+  assert.match(trainingHandler, /explicitTrainingReady/);
+  assert.match(trainingHandler, /bothImageInputsSelected/);
   assert.match(trainingHandler, /!imageZipFile/);
   assert.match(trainingHandler, /trainImageModel\(imageZipFile\)/);
   assert.match(appSource, /onClick=\{startImageTraining\}/);
-  assert.match(appSource, /Start Image Training/);
+  assert.match(appSource, /Train Image Model/);
 });
 
 test("deferred and ambiguous image routes expose no training or prediction action", () => {
@@ -450,30 +469,36 @@ test("deferred and ambiguous image routes expose no training or prediction actio
 
   assert.doesNotMatch(routingHandler, /trainImageModel|predictImageModel/);
   assert.match(actionMarkup, /intent === "IMAGE_TRAINING_REQUEST" && imageRoutingResult\.ready/);
-  assert.match(actionMarkup, /intent === "IMAGE_PREDICTION" && imageRoutingResult\.ready/);
+  assert.doesNotMatch(actionMarkup, /onClick=\{handleImagePredict\}/);
+  assert.match(appSource, /aria-label="Image prediction"/);
+  assert.match(appSource, /Predict Image/);
   assert.doesNotMatch(actionMarkup, /IMAGE_DATASET_ANALYSIS[\s\S]*trainImageModel/);
   assert.doesNotMatch(actionMarkup, /IMAGE_MODEL_EXPLANATION[\s\S]*predictImageModel/);
   assert.match(appSource, /UNKNOWN_AMBIGUOUS: "Needs Clarification"/);
 });
 
-test("image prediction requires a routed intent, model ID, and selected single image", () => {
+test("image prediction uses an existing model ID and selected single image without route gating", () => {
   const predictionHandler = appSource.slice(
     appSource.indexOf("async function handleImagePredict()"),
     appSource.indexOf("function useExample()"),
   );
 
   assert.match(appSource, /id="image-prediction-upload"/);
+  assert.match(appSource, /id="image-model-id"/);
   assert.match(appSource, /onClick=\{handleImagePredict\}/);
-  assert.match(predictionHandler, /imageRoutingResult\?\.intent !== "IMAGE_PREDICTION"/);
-  assert.match(predictionHandler, /!imageRoutingResult\.ready/);
-  assert.match(predictionHandler, /!imageModelId \|\| !imagePredictionFile/);
-  assert.match(predictionHandler, /predictImageModel\(imageModelId, imagePredictionFile\)/);
+  assert.doesNotMatch(predictionHandler, /imageRoutingResult/);
+  assert.match(predictionHandler, /!imageModelId\.trim\(\)/);
+  assert.match(predictionHandler, /!imagePredictionFile/);
+  assert.match(predictionHandler, /predictImageModel\(imageModelId\.trim\(\), imagePredictionFile\)/);
+  assert.match(predictionHandler, /imagePredictionInFlightRef\.current !== null/);
+  assert.match(appSource, /disabled=\{imagePredictionState === "loading"\}/);
 });
 
 test("image model ID state is reused for routing and prediction", () => {
   assert.equal((appSource.match(/const \[imageModelId, setImageModelId\]/g) || []).length, 1);
   assert.match(appSource, /image_model_id: imageModelId \|\| null/);
-  assert.match(appSource, /setImageModelId\(payload\.model_id \|\| ""\)/);
+  assert.match(appSource, /setImageModelId\(payload\.model_id\.trim\(\)\)/);
+  assert.match(appSource, /setImageModelSource\("trained"\)/);
 });
 
 test("routing errors are rendered as alerts without parsing assumptions", () => {
@@ -698,10 +723,44 @@ test("image prediction uses the image model and displays factual results", () =>
   );
 
   assert.match(appSource, /accept="\.jpg,\.jpeg,\.png,\.bmp,\.webp"/);
-  assert.match(imagePredictionHandler, /predictImageModel\(imageModelId, imagePredictionFile\)/);
+  assert.match(imagePredictionHandler, /predictImageModel\(imageModelId\.trim\(\), imagePredictionFile\)/);
   assert.doesNotMatch(imagePredictionHandler, /fetch\("\/predict\//);
   assert.match(appSource, /imagePredictionResult\.prediction\?\.class/);
   assert.match(appSource, /imagePredictionResult\.prediction\?\.confidence/);
   assert.match(appSource, /Object\.entries\(imagePredictionResult\.probabilities\)/);
   assert.match(appSource, /imagePredictionResult\.explanation/);
+  assert.match(appSource, /imagePredictionState === "loading"/);
+  assert.match(appSource, /imagePredictionError/);
+});
+
+test("both selected inputs expose distinct training and prediction actions", () => {
+  assert.match(appSource, /imageZipFile &&[\s\S]*imagePredictionFile/);
+  assert.match(appSource, /onClick=\{startImageTraining\}/);
+  assert.match(appSource, /Train Image Model/);
+  assert.match(appSource, /aria-label="Image prediction"[\s\S]*Predict Image/);
+  assert.match(appSource, /Both inputs are selected/);
+  assert.match(appSource, /Prediction requires a trained image model/);
+});
+
+test("Test your model is gated to a trained model or explicitly selected existing model", () => {
+  const testingPanel = appSource.slice(
+    appSource.indexOf('{imageModelId.trim() && ["trained", "existing"].includes(imageModelSource) && ('),
+    appSource.indexOf("</section>\n            )}", appSource.indexOf('{imageModelId.trim() && ["trained", "existing"].includes(imageModelSource) && (')),
+  );
+  const trainingHandler = appSource.slice(
+    appSource.indexOf("async function startImageTraining()"),
+    appSource.indexOf("async function handleImagePredict()"),
+  );
+
+  assert.match(testingPanel, /Test your model/);
+  assert.match(testingPanel, /imageModelSource === "trained"/);
+  assert.match(appSource, /\["trained", "existing"\]\.includes\(imageModelSource\)/);
+  assert.match(appSource, /aria-label="Use existing image model"/);
+  assert.match(appSource, /onClick=\{useExistingImageModel\}/);
+  assert.match(trainingHandler, /setImageTrainingState\("loading"\)/);
+  assert.match(trainingHandler, /setImageTrainingResult\(null\)/);
+  assert.match(trainingHandler, /if \(typeof payload\.model_id !== "string"/);
+  assert.match(trainingHandler, /setImageTrainingState\("success"\)/);
+  assert.match(trainingHandler, /setImageTrainingState\("error"\)/);
+  assert.doesNotMatch(trainingHandler, /setImagePredictionFile\(null\)/);
 });

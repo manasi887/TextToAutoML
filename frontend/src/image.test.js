@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   analyzeImageDataset,
   predictImageModel,
+  predictionIntentOverride,
   routeImageRequest,
   trainImageModel,
 } from "./image.js";
@@ -61,6 +62,52 @@ test("image prediction posts the model ID and image to the image prediction endp
   assert.equal(request.options.body.get("model_id"), "img_123");
   assert.equal(request.options.body.get("file").name, "cat.jpg");
   assert.deepEqual(result, payload);
+});
+
+test("image prediction uses the selected file and never calls the training endpoint", async () => {
+  const image = namedBlob("cat.4497.jpg", "image/jpeg");
+  const calls = [];
+  const result = await predictImageModel(
+    "img_20261011_231604_5c125d",
+    image,
+    async (url, options) => {
+      calls.push(url);
+      assert.equal(options.body.get("model_id"), "img_20261011_231604_5c125d");
+      assert.equal(options.body.get("file").name, "cat.4497.jpg");
+      return mockResponse(JSON.stringify({ prediction: { class: "cat", confidence: 0.96 } }));
+    },
+  );
+
+  assert.deepEqual(calls, ["/image/predict"]);
+  assert.equal(result.prediction.class, "cat");
+  assert.ok(!calls.includes("/image/train"));
+});
+
+test("image prediction validates missing model ID and image before requesting", async () => {
+  let called = false;
+  const fetchImpl = async () => {
+    called = true;
+    throw new Error("Should not call API without valid inputs.");
+  };
+
+  await assert.rejects(predictImageModel("", namedBlob("cat.jpg", "image/jpeg"), fetchImpl), /trained image model ID/);
+  await assert.rejects(predictImageModel("img_existing", null, fetchImpl), /Choose a single image/);
+  assert.equal(called, false);
+});
+
+test("image prediction displays backend errors as readable exceptions", async () => {
+  await assert.rejects(
+    predictImageModel("img_missing", namedBlob("cat.jpg", "image/jpeg"), async () =>
+      mockResponse(JSON.stringify({ detail: "Image model manifest not found." }), 404),
+    ),
+    /Image model manifest not found\./,
+  );
+  await assert.rejects(
+    predictImageModel("img_existing", namedBlob("broken.jpg", "image/jpeg"), async () =>
+      mockResponse(JSON.stringify({ detail: "Corrupt or unreadable image file." }), 400),
+    ),
+    /Corrupt or unreadable image file\./,
+  );
 });
 
 test("image dataset analysis posts the selected ZIP as multipart form data", async () => {
@@ -173,6 +220,100 @@ test("image prediction requests route with the existing model and single-image c
 
   assert.equal(result.intent, "IMAGE_PREDICTION");
   assert.equal(result.ready, true);
+});
+
+test("prediction prompt with an existing model ID is deterministically classified as prediction", async () => {
+  const request = {
+    text: "Use my existing trained image classification model with ID img_20261011_231604_5c125d to predict whether the uploaded image contains a cat or a dog.",
+    asset_type: "image",
+    image_available: true,
+    image_model_id: "img_20261011_231604_5c125d",
+  };
+  let called = false;
+
+  const decision = await routeImageRequest(request, async () => {
+    called = true;
+    throw new Error("Model-based routing should not override explicit prediction language.");
+  });
+
+  assert.equal(decision.intent, "IMAGE_PREDICTION");
+  assert.equal(decision.ready, true);
+  assert.equal(called, false);
+});
+
+test("Do not train a new model is a prediction override", () => {
+  const decision = predictionIntentOverride({
+    text: "Predict this image with my existing model. Do not train a new model.",
+    asset_type: "image",
+    image_available: true,
+    image_model_id: "img_existing",
+  });
+
+  assert.equal(decision.intent, "IMAGE_PREDICTION");
+  assert.equal(decision.ready, true);
+});
+
+test("a ZIP-backed image training request still uses the training route", async () => {
+  const request = {
+    text: "Train a CNN using this image dataset ZIP.",
+    asset_type: "image_dataset",
+    image_dataset_available: true,
+    image_available: false,
+    image_model_id: null,
+  };
+  let called = false;
+
+  const decision = await routeImageRequest(request, async (url) => {
+    called = true;
+    assert.equal(url, "/nlp/route");
+    return mockResponse(JSON.stringify({
+      modality: "image",
+      intent: "IMAGE_TRAINING_REQUEST",
+      ready: true,
+      clarification_required: false,
+      reason: "Ready to train.",
+      required_context: [],
+    }));
+  });
+
+  assert.equal(called, true);
+  assert.equal(decision.intent, "IMAGE_TRAINING_REQUEST");
+});
+
+test("affirmative training with both selected files is not overridden by prediction keywords", () => {
+  const decision = predictionIntentOverride({
+    text: "Train a new model using this ZIP to classify this image and predict its class.",
+    asset_type: "image_dataset",
+    image_dataset_available: true,
+    image_available: true,
+    image_model_id: "img_existing",
+  });
+
+  assert.equal(decision, null);
+});
+
+test("routing context preserves ZIP and single-image availability together", async () => {
+  const request = {
+    text: "Train a CNN on this image dataset.",
+    asset_type: "image_dataset",
+    image_dataset_available: true,
+    image_available: true,
+    image_model_id: "img_existing",
+  };
+
+  const result = await routeImageRequest(request, async (_url, options) => {
+    assert.deepEqual(JSON.parse(options.body), request);
+    return mockResponse(JSON.stringify({
+      modality: "image",
+      intent: "IMAGE_TRAINING_REQUEST",
+      ready: true,
+      clarification_required: false,
+      reason: "Ready to train.",
+      required_context: [],
+    }));
+  });
+
+  assert.equal(result.intent, "IMAGE_TRAINING_REQUEST");
 });
 
 test("routing rejects malformed successful responses", async () => {

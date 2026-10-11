@@ -36,7 +36,48 @@ const IMAGE_ROUTE_INTENTS = new Set([
   "UNKNOWN_AMBIGUOUS",
 ]);
 
+export function predictionIntentOverride(request) {
+  const text = typeof request?.text === "string" ? request.text : "";
+  const imageContext =
+    request?.asset_type === "image" ||
+    request?.asset_type === "image_dataset" ||
+    request?.image_available ||
+    request?.image_dataset_available;
+  const predicts = /\b(?:predict|classify|recognize|identify)\b/i.test(text);
+  const negatesTraining =
+    /\b(?:do\s+not|don't|dont|never|not)\s+(?:train|retrain|build|create)\b|\bno\s+(?:new\s+)?(?:training|model)\b/i.test(text);
+  const affirmativeTraining =
+    /\b(?:train|retrain|build|create|fit)\b/i.test(text) &&
+    !negatesTraining;
+  const explicitlyPrediction =
+    negatesTraining ||
+    /\b(?:existing|already\s+trained|saved)\s+(?:trained\s+)?(?:image\s+)?model\b|\bmodel\s+(?:id|with\s+id)\b/i.test(text) ||
+    /\bclassify\s+(?:this|that|the|selected|uploaded|single)\s+(?:image|photo|picture)\b/i.test(text) ||
+    !/\b(?:train|retrain|build|create|fit)\b/i.test(text);
+
+  if (!imageContext || !predicts || !explicitlyPrediction || affirmativeTraining) return null;
+
+  const requiredContext = [];
+  if (!(request.image_available || request.asset_type === "image")) {
+    requiredContext.push("image");
+  }
+  if (!request.image_model_id?.trim()) requiredContext.push("image_model_id");
+  return {
+    modality: "image",
+    intent: "IMAGE_PREDICTION",
+    ready: requiredContext.length === 0,
+    clarification_required: false,
+    reason: requiredContext.length
+      ? "A single image and a trained image model are required for image prediction."
+      : "Ready to route to image prediction.",
+    required_context: requiredContext,
+  };
+}
+
 export async function routeImageRequest(request, fetchImpl = globalThis.fetch) {
+  const predictionOverride = predictionIntentOverride(request);
+  if (predictionOverride) return predictionOverride;
+
   const response = await fetchImpl("/nlp/route", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -89,8 +130,14 @@ export async function analyzeImageDataset(file, fetchImpl = globalThis.fetch) {
 }
 
 export async function predictImageModel(modelId, file, fetchImpl = globalThis.fetch) {
+  if (typeof modelId !== "string" || !modelId.trim()) {
+    throw new Error("Enter a trained image model ID before predicting.");
+  }
+  if (!file) {
+    throw new Error("Choose a single image before predicting.");
+  }
   const formData = new FormData();
-  formData.append("model_id", modelId);
+  formData.append("model_id", modelId.trim());
   formData.append("file", file, file.name);
   const response = await fetchImpl("/image/predict", {
     method: "POST",

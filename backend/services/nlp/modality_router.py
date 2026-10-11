@@ -61,6 +61,20 @@ _TRAINING_OBJECTIVE = re.compile(
 _PREDICTION_ACTION = re.compile(
     r"\b(?:classify|predict|recognize|identify)\b", re.IGNORECASE
 )
+_IMAGE_LEVEL_CLASSIFICATION = re.compile(
+    r"\bclassify\s+(?:this|that|the|selected|uploaded|single)\s+(?:image|photo|picture)\b",
+    re.IGNORECASE,
+)
+_NEGATED_TRAINING = re.compile(
+    r"\b(?:do\s+not|don't|dont|never|not)\s+(?:train|retrain|build|create)\b|"
+    r"\bno\s+(?:new\s+)?(?:training|model)\b",
+    re.IGNORECASE,
+)
+_EXISTING_MODEL_REFERENCE = re.compile(
+    r"\b(?:existing|already\s+trained|saved)\s+(?:trained\s+)?(?:image\s+)?model\b|"
+    r"\bmodel\s+(?:id|with\s+id)\b",
+    re.IGNORECASE,
+)
 _REPORT_ACTION = re.compile(
     r"\b(?:report|accuracy|accurate|metrics|results?)\b", re.IGNORECASE
 )
@@ -150,10 +164,56 @@ def route_nlp_request(request: NlpRoutingRequest) -> NlpRoutingDecision:
     )
     image_available = request.image_available or image_asset
     image_request = explicit_image or has_image_context
+    prediction_requested = bool(_PREDICTION_ACTION.search(text))
+    training_negated = bool(_NEGATED_TRAINING.search(text))
+    affirmative_training = (
+        bool(_TRAIN_ACTION.search(text)) and not training_negated
+    )
+    prediction_override = prediction_requested and (
+        not affirmative_training
+        and (
+            training_negated
+            or bool(_EXISTING_MODEL_REFERENCE.search(text))
+            or bool(_IMAGE_LEVEL_CLASSIFICATION.search(text))
+            or not _TRAIN_ACTION.search(text)
+        )
+    )
+
+    if image_request and training_negated and not prediction_requested:
+        return _unknown(
+            "The request says not to train but does not specify another image action. Clarify whether you want prediction or analysis."
+        )
+
+    if image_request and prediction_override:
+        required_context: list[str] = []
+        if not image_available:
+            required_context.append("image")
+        if not request.image_model_id:
+            required_context.append("image_model_id")
+        return _decision(
+            "image",
+            "IMAGE_PREDICTION",
+            ready=not required_context,
+            reason=(
+                "Ready to route to image prediction."
+                if not required_context
+                else (
+                    "A single image and a trained image model are required for image prediction."
+                    if len(required_context) == 2
+                    else (
+                        "A single image is required for image prediction."
+                        if "image" in required_context
+                        else "A trained image model is required for image prediction."
+                    )
+                )
+            ),
+            required_context=required_context,
+        )
 
     if (
         image_request
         and _TRAIN_ACTION.search(text)
+        and not training_negated
         and (
             explicit_image
             or image_dataset_asset
@@ -223,7 +283,7 @@ def route_nlp_request(request: NlpRoutingRequest) -> NlpRoutingDecision:
             reason="Standalone image dataset analysis is not implemented yet.",
         )
 
-    if image_request and _PREDICTION_ACTION.search(text):
+    if image_request and prediction_requested:
         required_context: list[str] = []
         if not image_available:
             required_context.append("image")
@@ -236,11 +296,7 @@ def route_nlp_request(request: NlpRoutingRequest) -> NlpRoutingDecision:
             reason=(
                 "Ready to route to image prediction."
                 if not required_context
-                else (
-                    "A single image and a trained image model are required for image prediction."
-                    if "image" in required_context
-                    else "A trained image model is required for image prediction."
-                )
+                else "A single image and a trained image model are required for image prediction."
             ),
             required_context=required_context,
         )

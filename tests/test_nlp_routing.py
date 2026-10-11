@@ -157,8 +157,69 @@ def test_prediction_requires_both_single_image_and_model_when_missing():
     assert decision.required_context == ["image", "image_model_id"]
 
 
+def test_existing_model_prediction_with_negative_training_language_routes_to_prediction():
+    decision = route_nlp_request(
+        NlpRoutingRequest(
+            text=(
+                "Use my existing trained image classification model with ID "
+                "img_20261011_231604_5c125d to predict whether this image contains a cat or a dog. "
+                "Do not train a new model."
+            ),
+            asset_type="image",
+            image_available=True,
+            image_model_id="img_20261011_231604_5c125d",
+        )
+    )
+
+    assert decision.intent == "IMAGE_PREDICTION"
+    assert decision.ready is True
+    assert decision.required_context == []
+
+
+def test_negative_training_phrase_without_another_action_requires_clarification():
+    decision = route_nlp_request(
+        NlpRoutingRequest(
+            text="Do not train a new model.",
+            asset_type="image_dataset",
+            image_dataset_available=True,
+        )
+    )
+
+    assert decision.intent == "UNKNOWN_AMBIGUOUS"
+    assert decision.ready is False
+    assert decision.clarification_required is True
+
+
+def test_classify_this_image_is_prediction_even_when_training_data_is_available():
+    decision = route_nlp_request(
+        NlpRoutingRequest(
+            text="Classify this image using the existing model.",
+            asset_type="image_dataset",
+            image_dataset_available=True,
+            image_available=True,
+            image_model_id="img_existing",
+        )
+    )
+
+    assert decision.intent == "IMAGE_PREDICTION"
+
+
 def test_explicit_image_request_without_asset_context_routes_but_requires_dataset():
     decision = route_nlp_request(NlpRoutingRequest(text="Train a CNN on these images"))
+
+    assert decision.intent == "IMAGE_TRAINING_REQUEST"
+    assert decision.ready is False
+    assert decision.required_context == ["image_dataset"]
+
+
+def test_training_language_with_single_image_does_not_become_prediction_when_zip_is_missing():
+    decision = route_nlp_request(
+        NlpRoutingRequest(
+            text="Train a new model to classify this image.",
+            asset_type="image",
+            image_available=True,
+        )
+    )
 
     assert decision.intent == "IMAGE_TRAINING_REQUEST"
     assert decision.ready is False
@@ -170,6 +231,21 @@ def test_image_dataset_availability_flag_provides_image_context():
         NlpRoutingRequest(
             text="Train a model to classify cats and dogs",
             image_dataset_available=True,
+        )
+    )
+
+    assert decision.intent == "IMAGE_TRAINING_REQUEST"
+    assert decision.ready is True
+
+
+def test_explicit_image_training_with_both_assets_remains_training_despite_prediction_language():
+    decision = route_nlp_request(
+        NlpRoutingRequest(
+            text="Train a new model using this ZIP to classify this image and predict its class.",
+            asset_type="image_dataset",
+            image_dataset_available=True,
+            image_available=True,
+            image_model_id="img_existing",
         )
     )
 
