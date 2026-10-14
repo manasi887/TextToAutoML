@@ -128,14 +128,16 @@ def test_predict_api_returns_classification_success_response(persisted_model):
     assert len(body["predictions"]) == 2
 
 
-def test_predict_api_allows_optional_features(persisted_model):
+def test_predict_api_rejects_missing_required_features(persisted_model):
     client = TestClient(app)
     response = client.post(
         "/predict/",
         json={"model_id": persisted_model["model_id"], "data": [{}]},
     )
-    assert response.status_code == 200
-    assert response.json()["prediction_count"] == 1
+    assert response.status_code == 400
+    assert response.json()["detail"].startswith(
+        "Prediction data is missing required feature column(s):"
+    )
 
 
 def test_predict_api_returns_regression_success_response(tmp_path, monkeypatch):

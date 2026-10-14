@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildPredictionCsv,
   buildPredictionRecord,
   getEvaluationSummary,
   getPredictionConfig,
@@ -171,6 +172,32 @@ test("prediction config excludes target columns case-insensitively", () => {
   const config = getPredictionConfig(result);
 
   assert.deepEqual(config.featureNames, ["Age", "Balance"]);
+});
+
+test("prediction CSV includes labels, class probabilities, and escaped values", () => {
+  const csv = buildPredictionCsv({
+    predictions: [1, 0],
+    prediction_labels: ['Needs "review"', "Approved"],
+    probability_labels: ["Needs review", "Approved"],
+    probabilities: [
+      [0.75, 0.25],
+      [0.1, 0.9],
+    ],
+  });
+
+  assert.equal(
+    csv,
+    '"row","prediction","prediction_label","probability_Needs review","probability_Approved"\r\n' +
+      '"1","1","Needs ""review""","0.75","0.25"\r\n' +
+      '"2","0","Approved","0.1","0.9"',
+  );
+});
+
+test("prediction CSV supports numeric regression and clustering outputs", () => {
+  assert.equal(
+    buildPredictionCsv({ predictions: [1.25, 2.5] }),
+    '"row","prediction","prediction_label"\r\n"1","1.25",""\r\n"2","2.5",""',
+  );
 });
 
 test("classification evaluation summary exposes holdout, balanced, macro, and class metrics", () => {

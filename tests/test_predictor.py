@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from sklearn.preprocessing import OneHotEncoder
+from sklearn.tree import DecisionTreeClassifier
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
@@ -116,6 +117,85 @@ def test_predict_with_model_binary_classification(package_store_dir):
     assert result["prediction_count"] == 1
 
 
+def test_predict_with_model_maps_probabilities_in_estimator_class_order(package_store_dir):
+    package = _make_model_package(package_store_dir)
+
+    class ReversedClassesModel:
+        classes_ = np.array([1, 0])
+
+        def predict(self, X):
+            return np.zeros(len(X), dtype=int)
+
+        def predict_proba(self, X):
+            return np.tile([0.8, 0.2], (len(X), 1))
+
+    package["model"] = ReversedClassesModel()
+    package["preprocessing"]["target_classes"] = [0, 1]
+    result = predict_with_model(
+        package,
+        [{"Age": 30, "Balance": 1000, "country": "France", "gender": "Female"}],
+    )
+
+    assert result["predictions"] == [0]
+    assert result["prediction_labels"] == ["Not Exited"]
+    assert result["probability_labels"] == ["Exited", "Not Exited"]
+
+
+def test_saved_classifier_matches_known_labels_without_refitting(package_store_dir, monkeypatch):
+    package = _make_model_package(package_store_dir)
+    training_features = pd.DataFrame(
+        [
+            [20, 1000, 1, 0, 1, 0],
+            [30, 1000, 1, 0, 1, 0],
+            [50, 1000, 1, 0, 1, 0],
+            [60, 1000, 1, 0, 1, 0],
+        ],
+        columns=package["feature_names"],
+    )
+    fitted_model = DecisionTreeClassifier(random_state=42).fit(
+        training_features,
+        [0, 0, 1, 1],
+    )
+    saved = save_model_package(
+        model=fitted_model,
+        encoders=package["encoders"],
+        feature_names=package["feature_names"],
+        target_column="Exited",
+        problem_type="Binary Classification",
+        preprocessing={
+            **package["preprocessing"],
+            "target_classes": [0, 1],
+        },
+        model_name="GroundTruthTree",
+        selection_metric="balanced_accuracy",
+        metrics={"balanced_accuracy": 1.0},
+        storage_dir=package_store_dir,
+    )
+    loaded_package = load_model_package(
+        saved["model_id"],
+        storage_dir=package_store_dir,
+    )
+
+    monkeypatch.setattr(
+        loaded_package["model"],
+        "fit",
+        lambda *args, **kwargs: pytest.fail(
+            "prediction must not refit the saved model"
+        ),
+    )
+    result = predict_with_model(
+        loaded_package,
+        [
+            {"Age": 25, "Balance": 1000, "country": "France", "gender": "Female"},
+            {"Age": 55, "Balance": 1000, "country": "France", "gender": "Female"},
+        ],
+    )
+
+    assert result["predictions"] == [0, 1]
+    assert result["prediction_labels"] == ["Not Exited", "Exited"]
+    assert result["probability_labels"] == ["Not Exited", "Exited"]
+
+
 def test_predict_with_model_regression(package_store_dir):
     package = _make_model_package(package_store_dir, kind="regression")
     result = predict_with_model(package, [{"Age": 30, "country": "France"}])
@@ -124,17 +204,20 @@ def test_predict_with_model_regression(package_store_dir):
 
 def test_predict_with_model_missing_required_feature(package_store_dir):
     package = _make_model_package(package_store_dir)
-    result = predict_with_model(package, [{"Age": 30, "Balance": 1000}])
-    assert result["predictions"] in ([0], [1])
+    with pytest.raises(ValueError, match="missing required feature column"):
+        predict_with_model(package, [{"Age": 30, "Balance": 1000}])
 
 
-def test_predict_with_model_ignores_unexpected_feature_and_imputes_missing(package_store_dir):
+def test_predict_with_model_ignores_unexpected_feature_and_preserves_input_order(package_store_dir):
     package = _make_model_package(package_store_dir, kind="regression")
 
-    result = predict_with_model(package, [{"country": "Germany", "unexpected": "ignored"}])
+    result = predict_with_model(
+        package,
+        [{"country": "Germany", "Age": 20, "unexpected": "ignored"}],
+    )
 
     assert result["status"] == "success"
-    assert result["predictions"] == [31.0]
+    assert result["predictions"] == [21.0]
 
 
 def test_predict_with_model_rejects_invalid_numeric_feature(package_store_dir):
@@ -167,10 +250,10 @@ def test_predict_with_model_rejects_wrong_prediction_count(package_store_dir):
         ])
 
 
-def test_predict_with_model_optional_empty_record_uses_saved_imputation(package_store_dir):
+def test_predict_with_model_rejects_record_without_required_columns(package_store_dir):
     package = _make_model_package(package_store_dir)
-    result = predict_with_model(package, [{}])
-    assert result["predictions"] in ([0], [1])
+    with pytest.raises(ValueError, match="missing required feature column"):
+        predict_with_model(package, [{}])
 
 
 def test_predict_with_model_unknown_categorical_value(package_store_dir):

@@ -319,6 +319,42 @@ def test_classification_hpo_optimizes_selected_family_with_cv():
     assert tuning["parameters"]
 
 
+def test_imbalanced_grid_tuning_uses_balanced_accuracy_and_class_weights(monkeypatch):
+    seen_weights = []
+
+    def evaluate_candidates(models, X, y, problem_type):
+        model = next(iter(models.values()))
+        class_weight = model.get_params()["class_weight"]
+        seen_weights.append(class_weight)
+        metrics = (
+            {"f1_score": 0.80, "balanced_accuracy": 0.85}
+            if class_weight == "balanced"
+            else {"f1_score": 0.90, "balanced_accuracy": 0.60}
+        )
+        return {
+            "status": "Completed",
+            "errors": [],
+            "results": [{"metrics": metrics}],
+        }
+
+    monkeypatch.setattr(training_module, "evaluate_models_cv", evaluate_candidates)
+    features = pd.DataFrame({"feature": range(100)})
+    target = pd.Series([0] * 90 + [1] * 10)
+
+    result = tune_selected_model(
+        "DecisionTreeClassifier",
+        DecisionTreeClassifier(random_state=42),
+        features,
+        target,
+        "Binary Classification",
+    )
+
+    assert result["status"] == "Completed"
+    assert result["parameters"]["class_weight"] == "balanced"
+    assert result["metrics"]["balanced_accuracy"] == 0.85
+    assert set(seen_weights) == {None, "balanced"}
+
+
 def test_regression_hpo_optimizes_selected_family_with_cv():
     X, y = make_regression(
         n_samples=120,
@@ -654,23 +690,24 @@ def test_auto_optimizer_policy_selects_none_random_and_bayesian_with_work_caps()
         optuna_available=True,
         **common,
     )
+    large_config = {**common, "cv_folds": 3}
     large = policy(
         training_rows=5000,
-        feature_count=20,
+        feature_count=10,
         optuna_available=True,
-        **common,
+        **large_config,
     )
     large_without_optuna = policy(
         training_rows=5000,
-        feature_count=20,
+        feature_count=10,
         optuna_available=False,
-        **common,
+        **large_config,
     )
 
     assert small["selected_strategy"] == "none"
     assert small["trial_budget"] == 0
     assert medium["selected_strategy"] == "random"
-    assert medium["trial_budget"] == 8
+    assert medium["trial_budget"] == 7
     assert large["selected_strategy"] == "bayesian"
     assert 2 <= large["trial_budget"] < medium["trial_budget"]
     assert large["workload"]["estimated_total_work_units"] <= 300

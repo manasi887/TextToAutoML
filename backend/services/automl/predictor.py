@@ -43,15 +43,27 @@ def _validate_prediction_input(model_package: dict[str, Any], input_data: Any) -
     required_columns = [str(column) for column in expected_raw_columns]
     if not required_columns:
         raise ValueError("The saved model package does not include the required raw feature metadata.")
+    preprocessing = model_package.get("preprocessing", {}) or {}
+    uses_clustering_preprocessor = (
+        "clustering" in str(model_package.get("problem_type", "")).lower()
+        and preprocessing.get("clustering_preprocessor") is not None
+    )
 
     target_column = str(model_package.get("target_column", "")).strip()
     if target_column and target_column in raw_df.columns:
         raise ValueError(f"The target column '{target_column}' must not be provided during prediction.")
 
+    missing_columns = [column for column in required_columns if column not in raw_df.columns]
+    if missing_columns and not uses_clustering_preprocessor:
+        raise ValueError(
+            "Prediction data is missing required feature column(s): "
+            f"{', '.join(missing_columns)}."
+        )
+
     return raw_df.reindex(columns=required_columns).copy()
 
 
-def _display_class_labels(model_package: dict[str, Any]) -> list[str]:
+def _display_class_labels(model_package: dict[str, Any]) -> tuple[list[Any], list[str]]:
     preprocessing = model_package.get("preprocessing", {}) or {}
     classes = preprocessing.get("target_classes", [])
     if not isinstance(classes, list) or not classes:
@@ -68,6 +80,14 @@ def _display_class_labels(model_package: dict[str, Any]) -> list[str]:
     if not classes and str(model_package.get("problem_type", "")).lower().find("classification") >= 0:
         classes = [0, 1]
 
+    model = model_package.get("model")
+    model_classes = getattr(model, "classes_", None)
+    if isinstance(model_classes, np.ndarray):
+        model_classes = model_classes.tolist()
+    if not isinstance(model_classes, list) or not model_classes:
+        model_classes = list(range(len(classes))) if preprocessing.get("target_encoded") else classes
+
+    labels_by_class: list[tuple[Any, str]] = []
     if len(classes) == 2 and set(classes) == {0, 1}:
         target_column = str(model_package.get("target_column", "target")).strip()
         normalized_target = target_column.replace("_", " ").strip()
@@ -75,9 +95,23 @@ def _display_class_labels(model_package: dict[str, Any]) -> list[str]:
             positive_label = "Churned"
         else:
             positive_label = normalized_target.title() or "Positive"
-        return [f"Not {positive_label}", positive_label]
+        labels_by_class = [(0, f"Not {positive_label}"), (1, positive_label)]
+    elif preprocessing.get("target_encoded"):
+        labels_by_class = [
+            (index, str(label))
+            for index, label in enumerate(classes)
+            if index < len(classes)
+        ]
+    else:
+        labels_by_class = [(value, str(value)) for value in classes]
 
-    return [str(value) for value in classes]
+    def label_for(value: Any) -> str:
+        for class_value, label in labels_by_class:
+            if value == class_value:
+                return label
+        return str(value)
+
+    return model_classes, [label_for(value) for value in model_classes]
 
 
 def _apply_missing_value_strategy(df: pd.DataFrame, model_package: dict[str, Any]) -> pd.DataFrame:
@@ -142,6 +176,27 @@ def _validate_numeric_features(df: pd.DataFrame, model_package: dict[str, Any]) 
 
 
 def _apply_saved_encoders(df: pd.DataFrame, model_package: dict[str, Any]) -> pd.DataFrame:
+    preprocessing = model_package.get("preprocessing", {}) or {}
+    clustering_preprocessor = preprocessing.get("clustering_preprocessor")
+    if (
+        "clustering" in str(model_package.get("problem_type", "")).lower()
+        and clustering_preprocessor is not None
+    ):
+        transformed = clustering_preprocessor.transform(df)
+        if not isinstance(transformed, pd.DataFrame):
+            raise ValueError("The saved clustering preprocessor returned an invalid feature matrix.")
+        expected_feature_order = list(model_package.get("feature_names", []))
+        missing_expected = [
+            feature for feature in expected_feature_order
+            if feature not in transformed.columns
+        ]
+        if missing_expected:
+            raise ValueError(
+                "The saved clustering preprocessor is incompatible with the model feature schema: "
+                f"{', '.join(missing_expected)}"
+            )
+        return transformed.reindex(columns=expected_feature_order).copy()
+
     encoders = model_package.get("encoders", {}) or {}
     if not isinstance(encoders, dict):
         raise ValueError("The saved model package is missing encoder metadata.")
@@ -205,7 +260,13 @@ def predict_with_model(model_package: dict[str, Any], input_data: Any) -> dict[s
 
     raw_df = _validate_prediction_input(model_package, input_data)
     raw_df = _validate_numeric_features(raw_df, model_package)
-    raw_df = _apply_missing_value_strategy(raw_df, model_package)
+    preprocessing = model_package.get("preprocessing", {}) or {}
+    has_clustering_preprocessor = (
+        "clustering" in str(model_package.get("problem_type", "")).lower()
+        and preprocessing.get("clustering_preprocessor") is not None
+    )
+    if not has_clustering_preprocessor:
+        raw_df = _apply_missing_value_strategy(raw_df, model_package)
     encoded_df = _apply_saved_encoders(raw_df, model_package)
 
     model = model_package["model"]
@@ -246,13 +307,17 @@ def predict_with_model(model_package: dict[str, Any], input_data: Any) -> dict[s
         except Exception:
             pass
 
-    class_labels = _display_class_labels(model_package)
-    if class_labels and len(class_labels) == len(set(class_labels)):
+    model_classes, class_labels = _display_class_labels(model_package)
+    if class_labels:
+        labels_by_class = list(zip(model_classes, class_labels))
         result["prediction_labels"] = [
-            class_labels[int(value)] if isinstance(value, (int, np.integer)) and 0 <= int(value) < len(class_labels) else str(value)
+            next(
+                (label for class_value, label in labels_by_class if value == class_value),
+                str(value),
+            )
             for value in prediction_list
         ]
-        if "probabilities" in result:
+        if "probabilities" in result and len(class_labels) == len(result["probabilities"][0]):
             result["probability_labels"] = class_labels
 
     return result

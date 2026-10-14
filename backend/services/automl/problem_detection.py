@@ -273,9 +273,8 @@ def recommend_models(problem_type: str) -> Dict[str, object]:
         ]
     elif normalized_type == "clustering":
         recommended_models = [
-            "K-Means - efficient for partitioning data into spherical clusters.",
-            "DBSCAN - detects clusters of arbitrary shape and isolates noise.",
-            "Agglomerative Clustering - hierarchical clustering suitable for nested group structures.",
+            "K-Means - prediction-compatible partitioning with configurable cluster counts.",
+            "BIRCH - prediction-compatible hierarchical clustering for larger datasets.",
         ]
     else:
         recommended_models = [

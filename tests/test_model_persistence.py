@@ -6,6 +6,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
+import services.automl.persistence as persistence
 from services.automl.persistence import load_model_package, save_model_package
 
 
@@ -199,12 +200,14 @@ def test_model_package_contains_preprocessing_information(model_store_dir):
         selection_metric="f1_score",
         metrics={"f1_score": 0.8},
         storage_dir=model_store_dir,
+        training_config={"random_state": 42, "tuning_strategy": "auto"},
     )
 
     loaded = load_model_package(saved["model_id"], storage_dir=model_store_dir)
     assert loaded["preprocessing"]["removed_columns"]["identifier_columns"] == ["id"]
     assert loaded["preprocessing"]["imputed_columns"]["numeric"] == ["age"]
     assert loaded["encoders"]["country"] == "encoder"
+    assert loaded["training_config"] == {"random_state": 42, "tuning_strategy": "auto"}
 
 
 def test_multiple_saves_do_not_overwrite_each_other(model_store_dir):
@@ -236,3 +239,26 @@ def test_multiple_saves_do_not_overwrite_each_other(model_store_dir):
     assert (model_store_dir / first["model_path"]).exists()
     assert (model_store_dir / second["model_path"]).exists()
     assert first["model_path"] != second["model_path"]
+
+
+def test_default_load_finds_models_from_legacy_storage(model_store_dir, monkeypatch, tmp_path):
+    legacy_store = tmp_path / "legacy_models"
+    monkeypatch.setattr(persistence, "DEFAULT_STORAGE_DIR", model_store_dir)
+    monkeypatch.setattr(persistence, "LEGACY_STORAGE_DIR", legacy_store)
+    saved = save_model_package(
+        model=DemoModel(),
+        encoders={},
+        feature_names=["feature"],
+        target_column="target",
+        problem_type="Regression",
+        preprocessing={"raw_feature_names": ["feature"]},
+        model_name="LegacyModel",
+        selection_metric="rmse",
+        metrics={"rmse": 1.0},
+        storage_dir=legacy_store,
+    )
+
+    loaded = load_model_package(saved["model_id"])
+
+    assert loaded["model_id"] == saved["model_id"]
+    assert loaded["model_name"] == "LegacyModel"

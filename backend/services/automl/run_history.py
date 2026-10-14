@@ -101,7 +101,20 @@ def record_training_run(
         ),
         None,
     )
-    comparison = _comparison(previous, selection_metric, metric_value)
+    if "clustering" in problem_type.lower():
+        comparison = {
+            "status": "not_comparable",
+            "previous_run_id": previous.get("run_id") if previous else None,
+            "metric": selection_metric,
+            "metric_delta": None,
+            "reason": (
+                "Clustering scores depend on the fitted feature space and "
+                "cluster assignments; cross-run silhouette deltas are not "
+                "reported as improvements."
+            ),
+        }
+    else:
+        comparison = _comparison(previous, selection_metric, metric_value)
     record = {
         "run_id": run_id,
         "timestamp": timestamp,
@@ -114,6 +127,17 @@ def record_training_run(
         "training_time_seconds": training_output.get("training_time_seconds"),
         "meta_features": meta_features,
     }
+    selection_metrics = best_model.get("selection_metrics")
+    if isinstance(selection_metrics, dict):
+        record["selection_metrics"] = selection_metrics
+    preprocessing = training_output.get("preprocessing")
+    clustering_evaluation = (
+        preprocessing.get("clustering_evaluation")
+        if isinstance(preprocessing, dict)
+        else None
+    )
+    if isinstance(clustering_evaluation, dict):
+        record["clustering_evaluation"] = clustering_evaluation
     tuning = training_output.get("tuning")
     if isinstance(tuning, dict):
         record["optimizer_decision"] = {

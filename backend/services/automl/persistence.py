@@ -9,7 +9,8 @@ from typing import Any
 import joblib
 
 
-DEFAULT_STORAGE_DIR = (Path(__file__).resolve().parents[2] / "storage" / "models").resolve()
+DEFAULT_STORAGE_DIR = (Path(__file__).resolve().parents[3] / "storage" / "models").resolve()
+LEGACY_STORAGE_DIR = (Path(__file__).resolve().parents[2] / "storage" / "models").resolve()
 MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
 
 
@@ -32,6 +33,7 @@ def save_model_package(
     metrics: dict[str, Any],
     *,
     storage_dir: str | Path | None = None,
+    training_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Persist the selected model and all metadata needed for future feature reconstruction."""
     target_storage_dir = Path(storage_dir) if storage_dir is not None else DEFAULT_STORAGE_DIR
@@ -52,6 +54,7 @@ def save_model_package(
         "model_name": model_name,
         "selection_metric": selection_metric,
         "metrics": metrics,
+        "training_config": dict(training_config or {}),
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
     }
 
@@ -82,12 +85,21 @@ def load_model_package(model_id: str, *, storage_dir: str | Path | None = None) 
         raise ValueError("unsafe model_id value; only letters, numbers, and underscores are allowed.")
 
     target_storage_dir = Path(storage_dir) if storage_dir is not None else DEFAULT_STORAGE_DIR
-    safe_storage_dir = Path(target_storage_dir).resolve()
-    model_path = (safe_storage_dir / f"{cleaned_id}.joblib").resolve()
+    storage_dirs = [Path(target_storage_dir).resolve()]
+    if storage_dir is None:
+        legacy_storage_dir = Path(LEGACY_STORAGE_DIR).resolve()
+        if legacy_storage_dir not in storage_dirs:
+            storage_dirs.append(legacy_storage_dir)
 
-    if not model_path.is_relative_to(safe_storage_dir):
-        raise ValueError("Unsafe model_id path; it resolves outside the allowed storage directory.")
-    if not model_path.exists():
+    model_path = None
+    for safe_storage_dir in storage_dirs:
+        candidate = (safe_storage_dir / f"{cleaned_id}.joblib").resolve()
+        if not candidate.is_relative_to(safe_storage_dir):
+            raise ValueError("Unsafe model_id path; it resolves outside the allowed storage directory.")
+        if candidate.exists():
+            model_path = candidate
+            break
+    if model_path is None:
         raise FileNotFoundError(f"Model '{cleaned_id}' does not exist.")
 
     package = joblib.load(model_path)

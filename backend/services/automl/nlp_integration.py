@@ -75,15 +75,22 @@ def integrate_nlp_with_automl(
             excluded_target_columns = [target_column]
         else:
             candidates = resolution.get("candidates", [])
-            if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict):
-                candidate = candidates[0]
-                column = candidate.get("column")
-                try:
-                    confidence = float(candidate.get("confidence", 0.0))
-                except (TypeError, ValueError):
-                    confidence = 0.0
-                if isinstance(column, str) and column in df.columns and confidence >= 0.7:
-                    excluded_target_columns = [column]
+            if isinstance(candidates, list):
+                for candidate in candidates:
+                    if not isinstance(candidate, dict):
+                        continue
+                    column = candidate.get("column")
+                    try:
+                        confidence = float(candidate.get("confidence", 0.0))
+                    except (TypeError, ValueError):
+                        confidence = 0.0
+                    if (
+                        isinstance(column, str)
+                        and column in df.columns
+                        and confidence >= 0.7
+                        and column not in excluded_target_columns
+                    ):
+                        excluded_target_columns.append(column)
 
     training_started_at = time.perf_counter()
     pipeline_options: dict[str, Any] = {

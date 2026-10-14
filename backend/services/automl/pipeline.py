@@ -5,8 +5,11 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
+import numpy as np
+
 import pandas as pd
 from sklearn.base import clone
+from sklearn.ensemble import RandomForestClassifier
 
 from services.automl.persistence import save_model_package
 from services.automl.problem_detection import detect_problem_type
@@ -25,6 +28,7 @@ from services.automl.training import (
     train_models,
     tune_selected_model,
     _BAYESIAN_SEARCH_SPACES,
+    _classification_selection_metric,
     _safe_cv_folds,
 )
 from services.automl.optimizer import (
@@ -378,14 +382,84 @@ def run_automl_pipeline(
         evaluation_results = evaluation.get("results", [])
         if not evaluation_results:
             raise ValueError("No clustering model produced a valid evaluation.")
-        best_model_report = select_best_model(evaluation_results, normalized_problem_type)
-        best_model = best_model_report["best_model"]
-        best_name = best_model_report["best_model_name"]
-        metrics = best_model_report["best_metrics"]
+        remaining_results = list(evaluation_results)
+        while remaining_results:
+            best_model_report = select_best_model(
+                remaining_results, normalized_problem_type
+            )
+            selected_candidate = best_model_report["best_model"]
+            best_name = best_model_report["best_model_name"]
+            try:
+                full_data_candidate = clone(selected_candidate).fit(X)
+                final_evaluation = evaluate_models(
+                    {best_name: full_data_candidate},
+                    X,
+                    pd.Series(index=X.index, dtype=float),
+                    normalized_problem_type,
+                )
+                final_results = final_evaluation.get("results", [])
+            except Exception as exc:
+                final_results = []
+                final_evaluation = {"errors": [{"model_name": best_name, "error": str(exc)}]}
+            if final_results:
+                best_model = full_data_candidate
+                break
+            training_errors.extend(final_evaluation.get("errors", []))
+            remaining_results = [
+                result for result in remaining_results
+                if result.get("model_name") != best_name
+            ]
+        else:
+            raise ValueError("No clustering candidate remained valid after full-data fitting.")
+
+        metrics = final_results[0]["metrics"]
+        final_labels = best_model.predict(X)
+        cluster_labels, cluster_counts = np.unique(final_labels, return_counts=True)
+        cluster_distribution = [
+            {
+                "cluster": int(label) if isinstance(label, np.integer) else label,
+                "rows": int(count),
+                "share": float(count / len(X)),
+            }
+            for label, count in zip(cluster_labels, cluster_counts)
+        ]
+        minimum_reported_size = max(2, int(np.ceil(0.01 * len(X))))
+        selected_silhouette = metrics.get("silhouette_score")
+        quality_assessment = (
+            "No positive silhouette separation was observed among the evaluated candidates."
+            if isinstance(selected_silhouette, (int, float)) and selected_silhouette <= 0
+            else "A positive silhouette was observed; this does not establish business usefulness."
+        )
+        clustering_evaluation = {
+            "selection_strategy": (
+                "Candidates are ranked by mean rank across silhouette and "
+                "Calinski-Harabasz (higher is preferred) and Davies-Bouldin "
+                "(lower is preferred), all calculated on the same deterministic sample."
+            ),
+            "candidate_sample_rows": int(training_report.get("candidate_sample_size", 0)),
+            "candidate_cluster_counts": training_report.get(
+                "candidate_cluster_counts", []
+            ),
+            "candidate_algorithms": training_report.get(
+                "candidate_algorithms", []
+            ),
+            "selected_candidate_metrics": best_model_report["best_metrics"],
+            "final_model_metrics": metrics,
+            "cluster_distribution": cluster_distribution,
+            "small_cluster_count": int(
+                np.count_nonzero(cluster_counts < minimum_reported_size)
+            ),
+            "quality_assessment": quality_assessment,
+            "limitations": [
+                "Cluster quality metrics describe geometric separation, not accuracy or business validity.",
+                "K-Means and BIRCH do not establish that the dataset contains meaningful natural groups.",
+                "Outcome and label exclusion uses explicit target candidates plus conservative column-name and data-shape heuristics.",
+            ],
+        }
+        preparation["preprocessing"]["clustering_evaluation"] = clustering_evaluation
         excluded_targets = preparation["preprocessing"].get(
             "excluded_target_columns", []
         )
-        preprocessing_target = excluded_targets[0] if excluded_targets else None
         packaged_model = save_model_package(
             model=best_model,
             encoders=encoders,
@@ -394,13 +468,21 @@ def run_automl_pipeline(
             problem_type=normalized_problem_type,
             preprocessing={
                 **preparation["preprocessing"],
-                "target_column": preprocessing_target,
+                "target_column": None,
                 "feature_names": feature_names,
                 "encoders": encoders,
             },
             model_name=best_name,
             selection_metric="silhouette_score",
             metrics=metrics,
+            training_config={
+                "random_state": random_state,
+                "group_column": group_column,
+                "requested_feature_columns": feature_columns,
+                "excluded_target_columns": excluded_targets,
+                "selection_strategy": clustering_evaluation["selection_strategy"],
+                "model_parameters": best_model.get_params(deep=True),
+            },
         )
         return {
             "status": "success",
@@ -409,13 +491,13 @@ def run_automl_pipeline(
             "data": {"original_rows": int(len(df)), "original_columns": int(len(df.columns)), "training_rows": int(len(X)), "test_rows": 0, "feature_count": int(X.shape[1])},
             "preprocessing": {
                 **preparation["preprocessing"],
-                "target_column": preprocessing_target,
+                "target_column": None,
                 "feature_names": feature_names,
                 "encoders": encoders,
             },
             "models": {"trained": list(trained_models), "failed": training_errors},
             "evaluation": {"status": evaluation.get("status", "Completed"), "results": evaluation_results, "errors": evaluation.get("errors", [])},
-            "best_model": {"name": best_name, "selection_metric": "silhouette_score", "metrics": metrics, "reason": best_model_report["selection_reason"]},
+            "best_model": {"name": best_name, "selection_metric": "silhouette_score", "metrics": metrics, "selection_metrics": best_model_report["best_metrics"], "reason": best_model_report["selection_reason"]},
             "model": {"model_id": packaged_model["model_id"], "name": packaged_model["model_name"], "problem_type": normalized_problem_type, "target_column": None, "selection_metric": "silhouette_score", "metrics": metrics},
             **({
                 "tuning": select_auto_optimizer(
@@ -624,6 +706,33 @@ def run_automl_pipeline(
             validation_model = clone(tuning_model)
             validation_model.fit(X_train, y_train)
             validation_models[model_name] = validation_model
+            if (
+                "classification" in normalized_problem_type.lower()
+                and _classification_selection_metric(y_train) == "balanced_accuracy"
+            ):
+                model_parameters = tuning_model.get_params(deep=False)
+                class_weights = [None, "balanced"]
+                if isinstance(tuning_model, RandomForestClassifier):
+                    class_weights.append("balanced_subsample")
+                for class_weight in class_weights:
+                    if (
+                        "class_weight" not in model_parameters
+                        or model_parameters["class_weight"] == class_weight
+                    ):
+                        continue
+                    weight_name = class_weight or "none"
+                    weighted_name = f"{model_name}__class_weight_{weight_name}"
+                    try:
+                        weighted_model = clone(tuning_model).set_params(
+                            class_weight=class_weight
+                        )
+                        weighted_model.fit(X_train, y_train)
+                        validation_models[weighted_name] = weighted_model
+                    except Exception as exc:
+                        validation_model_errors.append({
+                            "model_name": weighted_name,
+                            "error": str(exc),
+                        })
         except Exception as exc:
             validation_error = {"model_name": model_name, "error": str(exc)}
             validation_model_errors.append(validation_error)
@@ -661,7 +770,7 @@ def run_automl_pipeline(
     include_tuning_summary = normalized_tuning_strategy in {"bayesian", "auto"}
     if not validation_results:
         validation_diagnostics = _build_validation_diagnostics(
-            list(trained_models),
+            list(validation_models),
             training_errors,
             tuning_results,
             [],
@@ -707,7 +816,7 @@ def run_automl_pipeline(
         ),
     )
     validation_diagnostics = _build_validation_diagnostics(
-        list(trained_models),
+        list(validation_models),
         training_errors,
         tuning_results,
         validation_results,
@@ -826,6 +935,15 @@ def run_automl_pipeline(
         model_name=best_name,
         selection_metric=selection_metric,
         metrics=metrics,
+        training_config={
+            "test_size": test_size,
+            "random_state": random_state,
+            "group_column": group_column,
+            "requested_feature_columns": feature_columns,
+            "tuning_strategy": normalized_tuning_strategy,
+            "tuning_trials": tuning_trials,
+            "model_parameters": best_model.get_params(deep=True),
+        },
     )
 
     return {

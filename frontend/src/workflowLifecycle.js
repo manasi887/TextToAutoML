@@ -91,6 +91,11 @@ export function getNlpTrainingOutcome(payload) {
   };
 }
 
+export function shouldShowTargetClasses(problemType) {
+  return typeof problemType === "string" &&
+    problemType.toLowerCase().includes("classification");
+}
+
 export function shouldRunTargetProxyDiagnostic({
   datasetType,
   diagnosticApplicable,

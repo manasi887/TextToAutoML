@@ -133,3 +133,49 @@ export function buildPredictionRecord({
   }
   return record;
 }
+
+export function buildPredictionCsv(result) {
+  const predictions = Array.isArray(result?.predictions) ? result.predictions : [];
+  const labels = Array.isArray(result?.prediction_labels)
+    ? result.prediction_labels
+    : [];
+  const probabilities = Array.isArray(result?.probabilities)
+    ? result.probabilities
+    : [];
+  const probabilityLabels = Array.isArray(result?.probability_labels)
+    ? result.probability_labels
+    : [];
+  const probabilityCount = probabilities.reduce(
+    (maximum, row) => Math.max(maximum, Array.isArray(row) ? row.length : 0),
+    0,
+  );
+  const headers = [
+    "row",
+    "prediction",
+    "prediction_label",
+    ...Array.from({ length: probabilityCount }, (_, index) =>
+      `probability_${probabilityLabels[index] ?? index + 1}`,
+    ),
+  ];
+  const escapeCsvValue = (value) => {
+    const text =
+      value === null || value === undefined
+        ? ""
+        : typeof value === "object"
+          ? JSON.stringify(value)
+          : String(value);
+    return `"${text.replaceAll('"', '""')}"`;
+  };
+  const rows = predictions.map((prediction, index) => [
+    index + 1,
+    prediction,
+    labels[index] ?? "",
+    ...Array.from({ length: probabilityCount }, (_, probabilityIndex) =>
+      probabilities[index]?.[probabilityIndex] ?? "",
+    ),
+  ]);
+
+  return [headers, ...rows]
+    .map((row) => row.map(escapeCsvValue).join(","))
+    .join("\r\n");
+}

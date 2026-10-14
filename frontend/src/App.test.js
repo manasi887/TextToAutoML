@@ -7,6 +7,7 @@ import {
   IMAGE_DATASET_RESET,
   resetImageDatasetWorkflow,
   resetTabularDatasetWorkflow,
+  shouldShowTargetClasses,
   shouldRunTargetProxyDiagnostic,
   TABULAR_DATASET_RESET,
 } from "./workflowLifecycle.js";
@@ -76,6 +77,16 @@ test("image dataset reset removes the old training model and prediction state", 
     assert.deepEqual(state[key], value, `${key} should be reset`);
   }
   assert.equal(state.imageZipFile.name, "old.zip");
+});
+
+test("tabular UI exposes saved model IDs and independent file-based testing", () => {
+  assert.match(appSource, /Saved model ID:/);
+  assert.match(appSource, /aria-label="Test Your Model"/);
+  assert.match(appSource, /id="saved-model-id"/);
+  assert.match(appSource, /id="saved-model-file"/);
+  assert.match(appSource, /fetch\("\/predict\/file"/);
+  assert.match(appSource, /Download results CSV/);
+  assert.match(appSource, /does not train or refit anything/);
 });
 
 test("upload readiness requires explicit successful dataset validation", () => {
@@ -161,6 +172,19 @@ test("dataset understanding uses only returned dataset and training metadata", (
   assert.match(appSource, /No semantic meaning is inferred/);
   assert.match(appSource, /Dataset snapshot pending clarification/);
   assert.match(appSource, /Column roles are not assigned until the task and target are resolved/);
+});
+
+test("target classes render for classification reports only", () => {
+  assert.equal(shouldShowTargetClasses("Binary Classification"), true);
+  assert.equal(shouldShowTargetClasses("Multi-class Classification"), true);
+  assert.equal(shouldShowTargetClasses("Regression"), false);
+  assert.equal(shouldShowTargetClasses("Clustering"), false);
+  assert.equal(shouldShowTargetClasses(""), false);
+
+  assert.equal(
+    (appSource.match(/\{isClassificationTask && Array\.isArray\((?:trainingPreprocessing\.target_classes|encodedTargets)\)/g) || []).length,
+    2,
+  );
 });
 
 test("training workflow explains supervised and clustering paths separately", () => {
@@ -322,6 +346,16 @@ test("training report separates model selection score from final holdout results
   assert.match(appSource, /per_class_metrics/);
   assert.match(appSource, /candidate\.error_reason/);
   assert.match(appSource, /validationDiagnostics\.length === 0 && evaluationResults\.length < candidates\.length/);
+});
+
+test("clustering report describes candidate samples, fitted preprocessing, and cluster sizes", () => {
+  assert.match(appSource, /Candidate sample metrics returned/);
+  assert.match(appSource, /median-imputed and robust-scaled/);
+  assert.match(appSource, /Date columns parsed/);
+  assert.match(appSource, /clusteringEvaluation\.final_model_metrics/);
+  assert.match(appSource, /clusteringEvaluation\.cluster_distribution/);
+  assert.match(appSource, /best mean rank across silhouette, Calinski-Harabasz, and Davies-Bouldin scores/);
+  assert.doesNotMatch(appSource, /numeric missing values use training-set means, categorical missing values use training-set modes, and categorical inputs are encoded for the model\." : "The target is kept separate/);
 });
 
 test("evaluation help is task-specific and per-class summary comes from returned F1 values", () => {

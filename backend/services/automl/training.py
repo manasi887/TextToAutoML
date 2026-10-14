@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import time
 from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
 import pandas as pd
 from sklearn.base import clone
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.cluster import DBSCAN, KMeans
+from sklearn.cluster import Birch, KMeans
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.model_selection import (
     GroupKFold,
@@ -16,12 +15,12 @@ from sklearn.model_selection import (
     StratifiedGroupKFold,
     StratifiedKFold,
 )
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
     accuracy_score,
     balanced_accuracy_score,
+    calinski_harabasz_score,
     confusion_matrix,
+    davies_bouldin_score,
     f1_score,
     mean_absolute_error,
     precision_score,
@@ -48,11 +47,13 @@ from .optimizer import (
 _BAYESIAN_SEARCH_SPACES = {
     "LogisticRegression": {
         "C": {"kind": "float", "low": 1e-3, "high": 100.0, "log": True},
+        "class_weight": {"kind": "categorical", "choices": [None, "balanced"]},
     },
     "DecisionTreeClassifier": {
         "max_depth": {"kind": "categorical", "choices": [None, 3, 5, 10, 20, 30]},
         "min_samples_split": {"kind": "int", "low": 2, "high": 20},
         "min_samples_leaf": {"kind": "int", "low": 1, "high": 10},
+        "class_weight": {"kind": "categorical", "choices": [None, "balanced"]},
     },
     "RandomForestClassifier": {
         "n_estimators": {"kind": "int", "low": 50, "high": 300, "step": 25},
@@ -60,6 +61,10 @@ _BAYESIAN_SEARCH_SPACES = {
         "min_samples_split": {"kind": "int", "low": 2, "high": 20},
         "min_samples_leaf": {"kind": "int", "low": 1, "high": 10},
         "max_features": {"kind": "categorical", "choices": ["sqrt", "log2", None]},
+        "class_weight": {
+            "kind": "categorical",
+            "choices": [None, "balanced", "balanced_subsample"],
+        },
     },
     "LinearRegression": {
         "fit_intercept": {"kind": "categorical", "choices": [True, False]},
@@ -84,6 +89,19 @@ _BAYESIAN_SEARCH_SPACES = {
 
 CLASS_IMBALANCE_RATIO_THRESHOLD = 2.0
 """Use balanced accuracy when the training largest/smallest class ratio is >= 2:1."""
+CLUSTERING_EVALUATION_SAMPLE_SIZE = 3000
+MAX_CLUSTER_COUNT_CANDIDATES = 12
+
+
+def _classification_selection_metric(target: pd.Series) -> str:
+    """Choose a class-sensitive metric when the training labels are imbalanced."""
+    counts = pd.Series(target).dropna().value_counts()
+    imbalance_ratio = float(counts.max() / counts.min()) if len(counts) >= 2 else 1.0
+    return (
+        "balanced_accuracy"
+        if imbalance_ratio >= CLASS_IMBALANCE_RATIO_THRESHOLD
+        else "f1_score"
+    )
 
 
 def _build_model_specs(
@@ -179,15 +197,20 @@ def train_models(
     }
 
 
-def _clustering_score_sample(X: pd.DataFrame, max_rows: int = 5000) -> pd.DataFrame:
+def _clustering_score_sample(
+    X: pd.DataFrame,
+    max_rows: int = CLUSTERING_EVALUATION_SAMPLE_SIZE,
+) -> pd.DataFrame:
     """Return a deterministic sample for silhouette scoring on large datasets."""
     if len(X) <= max_rows:
         return X.copy()
     return X.sample(n=max_rows, random_state=42).copy()
 
 
-def train_clustering_models(X_train: pd.DataFrame) -> Dict[str, object]:
-    """Train deterministic KMeans candidates on the prepared feature matrix."""
+def train_clustering_models(
+    X_train: pd.DataFrame,
+) -> Dict[str, object]:
+    """Fit comparable, prediction-compatible clustering candidates on one sample."""
     if X_train is None or X_train.empty:
         return {
             "trained_models": {},
@@ -205,7 +228,11 @@ def train_clustering_models(X_train: pd.DataFrame) -> Dict[str, object]:
             "training_errors": [{"model_name": None, "error": "Clustering requires at least two rows."}],
         }
 
-    max_k = min(10, n_samples - 1)
+    max_k = min(
+        MAX_CLUSTER_COUNT_CANDIDATES,
+        int(np.sqrt(n_samples)),
+        n_samples - 1,
+    )
     candidate_ks = list(range(2, max_k + 1))
     if not candidate_ks:
         return {
@@ -213,31 +240,47 @@ def train_clustering_models(X_train: pd.DataFrame) -> Dict[str, object]:
             "model_names": [],
             "status": "Failed",
             "training_errors": [{"model_name": None, "error": "No valid KMeans cluster counts are available."}],
+            "candidate_cluster_counts": [],
+            "candidate_algorithms": ["KMeans", "BIRCH"],
         }
 
     trained_models: Dict[str, Any] = {}
     training_errors: List[Dict[str, Any]] = []
+    candidate_sample = _clustering_score_sample(X_train)
 
     for k in candidate_ks:
-        model_name = f"KMeans_k{k}"
-        try:
-            model = make_pipeline(StandardScaler(), KMeans(n_clusters=k, random_state=42, n_init=10))
-            model.fit(X_train)
-
-            labels = model.predict(X_train)
-            unique_labels = np.unique(labels)
-            if unique_labels.size < 2 or unique_labels.size >= n_samples:
-                raise ValueError(f"KMeans(k={k}) produced an invalid silhouette configuration.")
-
-            trained_models[model_name] = model
-        except Exception as exc:  # pragma: no cover - defensive failure recording
-            training_errors.append({"model_name": model_name, "error": str(exc)})
+        candidates = (
+            (
+                f"KMeans_k{k}",
+                KMeans(n_clusters=k, random_state=42, n_init=10),
+            ),
+            (f"Birch_k{k}", Birch(n_clusters=k)),
+        )
+        for model_name, model in candidates:
+            try:
+                model.fit(candidate_sample)
+                labels = np.asarray(model.predict(candidate_sample))
+                unique_labels = np.unique(labels)
+                if unique_labels.size < 2 or unique_labels.size >= len(candidate_sample):
+                    raise ValueError(
+                        f"{model_name} produced an invalid silhouette configuration."
+                    )
+                if unique_labels.size != k:
+                    raise ValueError(
+                        f"{model_name} produced {unique_labels.size} clusters instead of {k}."
+                    )
+                trained_models[model_name] = model
+            except Exception as exc:  # pragma: no cover - defensive failure recording
+                training_errors.append({"model_name": model_name, "error": str(exc)})
 
     return {
         "trained_models": trained_models,
         "model_names": list(trained_models),
         "status": "Completed" if trained_models else "Failed",
         "training_errors": training_errors,
+        "candidate_sample_size": len(candidate_sample),
+        "candidate_cluster_counts": candidate_ks,
+        "candidate_algorithms": ["KMeans", "BIRCH"],
     }
 
 
@@ -266,21 +309,54 @@ def evaluate_models(
     errors: List[Dict[str, Any]] = []
     normalized_type = (problem_type or "").strip().lower()
     clustering_score_sample = (
-        _clustering_score_sample(X_test) if "clustering" in normalized_type else None
+        _clustering_score_sample(X_test)
+        if "clustering" in normalized_type
+        else None
     )
 
     for model_name, model in models.items():
         try:
+            clustering_details: dict[str, Any] = {}
             if "clustering" in normalized_type:
                 assert clustering_score_sample is not None
                 labels = np.asarray(model.predict(clustering_score_sample))
-                unique_labels = set(labels.tolist())
+                unique_labels, cluster_counts = np.unique(labels, return_counts=True)
                 if len(unique_labels) < 2 or len(unique_labels) >= len(clustering_score_sample):
                     raise ValueError("Clustering evaluation requires at least two non-trivial clusters.")
-                score = float(silhouette_score(clustering_score_sample, labels))
-                if not np.isfinite(score):
-                    raise ValueError("Clustering evaluation produced a non-finite silhouette score.")
-                metrics = {"silhouette_score": score}
+                scoring_features = clustering_score_sample
+                model_steps = getattr(model, "steps", [])
+                if len(model_steps) > 1:
+                    scoring_features = model[:-1].transform(clustering_score_sample)
+                try:
+                    metrics = {
+                        "silhouette_score": float(
+                            silhouette_score(scoring_features, labels)
+                        ),
+                        "calinski_harabasz_score": float(
+                            calinski_harabasz_score(scoring_features, labels)
+                        ),
+                        "davies_bouldin_score": float(
+                            davies_bouldin_score(scoring_features, labels)
+                        ),
+                    }
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Clustering metrics could not be calculated: {exc}"
+                    ) from exc
+                if not all(np.isfinite(value) for value in metrics.values()):
+                    raise ValueError("Clustering evaluation produced a non-finite metric.")
+                clustering_details = {
+                    "cluster_sizes": {
+                    str(label): int(count)
+                    for label, count in zip(unique_labels, cluster_counts)
+                    },
+                    "small_cluster_count": int(
+                        np.count_nonzero(
+                            cluster_counts
+                            < max(2, int(np.ceil(0.01 * len(clustering_score_sample))))
+                        )
+                    ),
+                }
             elif "regression" in normalized_type:
                 predictions = model.predict(X_test)
                 metrics = {
@@ -343,12 +419,14 @@ def evaluate_models(
             else:
                 raise ValueError(f"Unsupported problem type for evaluation: {problem_type}")
 
-            results.append({
+            result = {
                 "model_name": model_name,
                 "model": model,
                 "metrics": metrics,
                 "status": "Evaluated",
-            })
+            }
+            result.update(clustering_details)
+            results.append(result)
         except Exception as exc:  # pragma: no cover - defensive failure recording
             errors.append({"model_name": model_name, "error": str(exc)})
 
@@ -438,22 +516,30 @@ def evaluate_models_cv(
                     else StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
                 )
                 fold_scores = []
+                fold_balanced_accuracy = []
                 split_iterator = cv.split(X_train, y_train, groups) if groups is not None else cv.split(X_train, y_train)
                 for train_idx, valid_idx in split_iterator:
                     fold_model = clone(model)
                     fold_model.fit(X_train.iloc[train_idx], y_train.iloc[train_idx])
                     y_pred = fold_model.predict(X_train.iloc[valid_idx])
+                    y_true = y_train.iloc[valid_idx]
                     fold_scores.append(
                         float(
                             f1_score(
-                                y_train.iloc[valid_idx],
+                                y_true,
                                 y_pred,
                                 average="weighted",
                                 zero_division=0,
                             )
                         )
                     )
-                metrics = {"f1_score": float(np.mean(fold_scores))}
+                    fold_balanced_accuracy.append(
+                        float(balanced_accuracy_score(y_true, y_pred))
+                    )
+                metrics = {
+                    "f1_score": float(np.mean(fold_scores)),
+                    "balanced_accuracy": float(np.mean(fold_balanced_accuracy)),
+                }
             elif "regression" in normalized_type:
                 cv = (
                     GroupKFold(n_splits=n_splits)
@@ -522,9 +608,18 @@ def tune_selected_model(
         ensure_optuna_available()
 
     search_spaces = {
-        "LogisticRegression": {"C": [0.1, 1.0]},
-        "DecisionTreeClassifier": {"max_depth": [None, 5]},
-        "RandomForestClassifier": {"n_estimators": [100, 200]},
+        "LogisticRegression": {
+            "C": [0.1, 1.0],
+            "class_weight": [None, "balanced"],
+        },
+        "DecisionTreeClassifier": {
+            "max_depth": [None, 5],
+            "class_weight": [None, "balanced"],
+        },
+        "RandomForestClassifier": {
+            "n_estimators": [100, 200],
+            "class_weight": [None, "balanced", "balanced_subsample"],
+        },
         "LinearRegression": {"fit_intercept": [True, False]},
         "DecisionTreeRegressor": {"max_depth": [None, 5]},
         "RandomForestRegressor": {"n_estimators": [50, 100]},
@@ -596,7 +691,15 @@ def tune_selected_model(
                 "errors": [{"model_name": model_name, "error": f"No {normalized_strategy} search space is defined for this estimator."}],
             }
 
-        metric_name = "f1_score" if "classification" in normalized_type else "rmse"
+        metric_name = (
+            _classification_selection_metric(
+                raw_training_df[target_column]
+                if raw_training_df is not None and target_column is not None
+                else y_train
+            )
+            if "classification" in normalized_type
+            else "rmse"
+        )
         direction = "maximize" if metric_name == "f1_score" else "minimize"
         fold_metric_cache: dict[tuple[tuple[str, Any], ...], dict[str, float]] = {}
 
@@ -692,9 +795,18 @@ def tune_selected_model(
     if not candidates:
         return {"model": model, "status": "Fallback", "errors": errors}
 
+    metric_name = (
+        _classification_selection_metric(
+            raw_training_df[target_column]
+            if raw_training_df is not None and target_column is not None
+            else y_train
+        )
+        if "classification" in normalized_type
+        else "rmse"
+    )
     if "classification" in normalized_type:
         best_metrics, best_model, best_parameters = max(
-            candidates, key=lambda item: item[0]["f1_score"]
+            candidates, key=lambda item: item[0][metric_name]
         )
     else:
         best_metrics, best_model, best_parameters = min(
@@ -768,7 +880,10 @@ def _evaluate_model_cv_with_preprocessing(
                             average="weighted",
                             zero_division=0,
                         )
-                    )
+                    ),
+                    "balanced_accuracy": float(
+                        balanced_accuracy_score(y_validation, predictions)
+                    ),
                 }
             else:
                 raise ValueError(f"Unsupported problem type for CV evaluation: {problem_type}")
@@ -805,7 +920,8 @@ def select_best_model(
     Select the best candidate using the task-specific primary metric.
 
     Regression: lowest RMSE.
-    Clustering: highest silhouette score.
+    Clustering: best mean rank across silhouette, Calinski-Harabasz, and
+    Davies-Bouldin scores.
     Classification: highest weighted F1 for balanced training classes, otherwise
     highest balanced accuracy when the training largest/smallest class ratio is
     at least ``CLASS_IMBALANCE_RATIO_THRESHOLD``.
@@ -830,26 +946,20 @@ def select_best_model(
 
     if "clustering" in normalized_type:
         metric_name = "silhouette_score"
-        selector = max
-        reason = "highest silhouette_score"
+        selector = min
+        reason = (
+            "best mean metric rank across silhouette, Calinski-Harabasz, "
+            "and Davies-Bouldin scores"
+        )
     elif "regression" in normalized_type:
         metric_name = "rmse"
         selector = min
         reason = "lowest rmse"
     elif "classification" in normalized_type:
-        training_counts = (
-            training_target.dropna().value_counts()
+        metric_name = _classification_selection_metric(
+            training_target
             if isinstance(training_target, pd.Series)
             else pd.Series(dtype="int64")
-        )
-        if len(training_counts) >= 2:
-            imbalance_ratio = float(training_counts.max() / training_counts.min())
-        else:
-            imbalance_ratio = 1.0
-        metric_name = (
-            "balanced_accuracy"
-            if imbalance_ratio >= CLASS_IMBALANCE_RATIO_THRESHOLD
-            else "f1_score"
         )
         selector = max
         reason = f"highest {metric_name}"
@@ -881,10 +991,45 @@ def select_best_model(
         }
 
     valid_results.sort(key=lambda item: str(item.get("model_name", "")))
-    best_result = selector(
-        valid_results,
-        key=lambda item: float(item["metrics"][metric_name]),
-    )
+    if "clustering" in normalized_type:
+        metric_directions = {
+            "silhouette_score": -1,
+            "calinski_harabasz_score": -1,
+            "davies_bouldin_score": 1,
+        }
+        rank_totals = {id(item): 0.0 for item in valid_results}
+        rank_counts = {id(item): 0 for item in valid_results}
+        for metric, direction in metric_directions.items():
+            available = [
+                item for item in valid_results
+                if isinstance(item.get("metrics"), dict)
+                and isinstance(item["metrics"].get(metric), (int, float, np.number))
+                and np.isfinite(float(item["metrics"][metric]))
+            ]
+            ranked = sorted(
+                available,
+                key=lambda item: (
+                    direction * float(item["metrics"][metric]),
+                    str(item.get("model_name", "")),
+                ),
+            )
+            for rank, item in enumerate(ranked, start=1):
+                rank_totals[id(item)] += float(rank)
+                rank_counts[id(item)] += 1
+
+        best_result = min(
+            valid_results,
+            key=lambda item: (
+                rank_totals[id(item)] / max(rank_counts[id(item)], 1),
+                -float(item["metrics"][metric_name]),
+                str(item.get("model_name", "")),
+            ),
+        )
+    else:
+        best_result = selector(
+            valid_results,
+            key=lambda item: float(item["metrics"][metric_name]),
+        )
     best_metrics = best_result.get("metrics", {})
     best_name = best_result.get("model_name")
     best_model = best_result.get("model")

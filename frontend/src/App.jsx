@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   buildPredictionRecord as createPredictionRecord,
+  buildPredictionCsv,
   getPredictionConfig,
   getEvaluationSummary,
 } from "./prediction.js";
@@ -16,6 +17,7 @@ import {
   getUploadValidationError,
   resetImageDatasetWorkflow,
   resetTabularDatasetWorkflow,
+  shouldShowTargetClasses,
   shouldRunTargetProxyDiagnostic,
 } from "./workflowLifecycle.js";
 import {
@@ -148,7 +150,8 @@ function getRemovedColumnReason(removedColumns, column) {
     identifier_columns: "identified as an identifier",
     constant_columns: "contains a constant value",
     group_columns: "used as the group column",
-    target_columns: "used as the target",
+    target_columns: "excluded as a target candidate",
+    clustering_label_columns: "identified as an existing outcome, segment, or cluster label",
   };
   for (const [reason, columns] of Object.entries(removedColumns || {})) {
     if (Array.isArray(columns) && columns.includes(column)) {
@@ -210,6 +213,7 @@ export default function App() {
     diagnosticTrackerRef.current = createLatestRequestTracker();
   }
   const tabularWorkflowRequestRef = useRef(0);
+  const savedPredictionRequestRef = useRef(0);
   const imageTrainingRequestRef = useRef(0);
   const imagePredictionRequestRef = useRef(0);
   const imagePredictionInFlightRef = useRef(null);
@@ -218,6 +222,11 @@ export default function App() {
   const [predictionMode, setPredictionMode] = useState("sample");
   const [predictionInputs, setPredictionInputs] = useState({});
   const [predictionResult, setPredictionResult] = useState(null);
+  const [savedModelIdInput, setSavedModelIdInput] = useState("");
+  const [savedModelFile, setSavedModelFile] = useState(null);
+  const [savedModelPredictionState, setSavedModelPredictionState] = useState("idle");
+  const [savedModelPredictionError, setSavedModelPredictionError] = useState("");
+  const [savedModelPredictionResult, setSavedModelPredictionResult] = useState(null);
   const [imageZipFile, setImageZipFile] = useState(null);
   const [imageZipValidationError, setImageZipValidationError] = useState("");
   const [imageRoutingState, setImageRoutingState] = useState("idle");
@@ -242,6 +251,10 @@ export default function App() {
   const predictionConfig = getPredictionConfig(trainingResult);
   const evaluationSummary = getEvaluationSummary(trainingResult);
   const tuningDecision = getTuningDecision(trainingResult);
+  const trainedTabularModelId =
+    trainingResult?.automl_training?.model?.model_id ||
+    trainingResult?.report?.model_id ||
+    "";
   const resolvedTargetColumn =
     analyzeResult?.dataset_resolution?.target_column ||
     analyzeResult?.target?.matched_column;
@@ -284,6 +297,7 @@ export default function App() {
     trainingResult?.report?.task?.problem_type ||
     analyzeResult?.dataset_resolution?.problem_type ||
     "";
+  const isClassificationTask = shouldShowTargetClasses(trainingProblemType);
   const isClusteringTask = String(trainingProblemType).toLowerCase().includes("cluster");
   const trainingTargetColumn =
     isClusteringTask
@@ -300,11 +314,14 @@ export default function App() {
     ? trainingPreprocessing.raw_feature_names
     : null;
   const displayedFeatureNames = trainingFeatureNames || selectedFeatureColumns;
-  const removedColumnEntries = Object.entries(
-    trainingPreprocessing.removed_columns || {},
-  ).flatMap(([reason, columns]) =>
-    Array.isArray(columns) ? columns.map((column) => ({ column, reason })) : [],
-  );
+  const removedColumnEntries = Array.isArray(trainingPreprocessing.excluded_features)
+    ? trainingPreprocessing.excluded_features.filter(
+      (item) => item && typeof item.column === "string",
+    )
+    : Object.entries(trainingPreprocessing.removed_columns || {}).flatMap(
+      ([reason, columns]) =>
+        Array.isArray(columns) ? columns.map((column) => ({ column, reason })) : [],
+    );
   const encoderEntries = Object.entries(trainingPreprocessing.encoders || {}).filter(
     ([, encoder]) => encoder && typeof encoder.type === "string",
   );
@@ -829,6 +846,11 @@ export default function App() {
       setTrainingResult(outcome.result);
       setTrainingState("success");
       setTrainingConfirmed(true);
+      setSavedModelIdInput(
+        outcome.result?.automl_training?.model?.model_id ||
+          outcome.result?.report?.model_id ||
+          "",
+      );
       setPredictionState("idle");
       setPredictionError("");
       setPredictionMode("sample");
@@ -914,6 +936,72 @@ export default function App() {
       setPredictionState("error");
       setPredictionError(error.message || "Prediction failed. Please try again.");
     }
+  }
+
+  async function handleSavedModelFilePredict() {
+    const modelId = savedModelIdInput.trim();
+    if (!modelId) {
+      setSavedModelPredictionState("error");
+      setSavedModelPredictionError("Enter a saved tabular model ID.");
+      setSavedModelPredictionResult(null);
+      return;
+    }
+    if (!savedModelFile) {
+      setSavedModelPredictionState("error");
+      setSavedModelPredictionError("Choose a CSV or Excel file to test.");
+      setSavedModelPredictionResult(null);
+      return;
+    }
+
+    const requestId = ++savedPredictionRequestRef.current;
+    setSavedModelPredictionState("loading");
+    setSavedModelPredictionError("");
+    setSavedModelPredictionResult(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("model_id", modelId);
+      formData.append("file", savedModelFile);
+      const response = await fetch("/predict/file", {
+        method: "POST",
+        body: formData,
+      });
+      const payload = await response.json();
+      if (requestId !== savedPredictionRequestRef.current) return;
+
+      if (!response.ok) {
+        const detail = payload.detail;
+        throw new Error(
+          typeof detail === "string"
+            ? detail
+            : detail?.message || "Saved-model prediction failed.",
+        );
+      }
+
+      setSavedModelPredictionResult(payload);
+      setSavedModelPredictionState("success");
+    } catch (error) {
+      if (requestId !== savedPredictionRequestRef.current) return;
+      setSavedModelPredictionState("error");
+      setSavedModelPredictionError(
+        error.message || "Saved-model prediction failed. Please try again.",
+      );
+    }
+  }
+
+  function downloadSavedModelPredictions() {
+    if (!savedModelPredictionResult) return;
+    const csv = buildPredictionCsv(savedModelPredictionResult);
+    const url = URL.createObjectURL(
+      new Blob([csv], { type: "text/csv;charset=utf-8" }),
+    );
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${savedModelPredictionResult.model_id || "model"}_predictions.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
   }
 
   return (
@@ -1529,7 +1617,7 @@ export default function App() {
                           </tbody>
                         </table>
                       </div>
-                      {Array.isArray(trainingPreprocessing.target_classes) && trainingPreprocessing.target_classes.length > 0 && (
+                      {isClassificationTask && Array.isArray(trainingPreprocessing.target_classes) && trainingPreprocessing.target_classes.length > 0 && (
                         <p style={{ margin: "10px 0 0", color: "#526158", font: "13px/1.5 Arial, sans-serif" }}>
                           Target classes: {trainingPreprocessing.target_classes.join(", ")}
                         </p>
@@ -1951,7 +2039,13 @@ export default function App() {
                 : [];
               const numericColumns = trainingPreprocessing.imputed_columns?.numeric;
               const categoricalColumns = trainingPreprocessing.imputed_columns?.categorical;
+              const dateColumns = trainingPreprocessing.imputed_columns?.date;
               const encodedTargets = trainingPreprocessing.target_classes;
+              const clusteringEvaluation = trainingPreprocessing.clustering_evaluation || {};
+              const clusteringMetrics = clusteringEvaluation.final_model_metrics || {};
+              const clusterDistribution = Array.isArray(clusteringEvaluation.cluster_distribution)
+                ? clusteringEvaluation.cluster_distribution
+                : [];
               const isClustering = String(trainingProblemType).toLowerCase().includes("cluster");
               const selectionReason = String(bestModel.reason || "");
               const readableSelectionReason = selectionReason.toLowerCase().includes("highest f1_score")
@@ -1960,6 +2054,8 @@ export default function App() {
                   ? "It had the lowest RMSE among candidates on the validation data."
                   : selectionReason.toLowerCase().includes("highest silhouette_score")
                     ? "It had the highest silhouette score among the clustering candidates."
+                    : selectionReason.toLowerCase().includes("best mean rank")
+                      ? "It had the best mean rank across silhouette, Calinski-Harabasz, and Davies-Bouldin scores."
                     : selectionReason;
                 const diagnosticMetricSummary = (metrics) => {
                   if (!metrics || typeof metrics !== "object") return "Not available";
@@ -2021,7 +2117,7 @@ export default function App() {
                     <h3 style={{ margin: "0 0 8px", fontSize: "17px", fontWeight: 600 }}>B. Data preparation</h3>
                     <p style={{ margin: "0 0 10px", color: "#526158", font: "13px/1.5 Arial, sans-serif" }}>
                       {isClustering
-                        ? "This clustering workflow prepares input features without a target column. Numeric missing values use training-set means, categorical missing values use training-set modes, and categorical inputs are encoded for the model."
+                        ? "This clustering workflow has no target. Numeric and parseable date features are median-imputed and robust-scaled; nominal categories use one-hot encoding. Constant, identifier-like, target, and existing label columns are excluded with recorded reasons."
                         : "The target is kept separate from input features. Numeric missing values use training-set means, categorical missing values use training-set modes, and categorical inputs are encoded for the model."}
                     </p>
                     {trainingFeatureNames && (
@@ -2035,7 +2131,7 @@ export default function App() {
                         <ul style={{ margin: "4px 0 0", paddingLeft: "20px", color: "#526158" }}>
                           {removedColumnEntries.map(({ column, reason }, index) => (
                             <li key={`${column}-${reason}-${index}`}>
-                              {column}: {getRemovedColumnReason({ [reason]: trainingPreprocessing.removed_columns[reason] }, column) || "excluded during preprocessing"}
+                              {column}: {reason || getRemovedColumnReason({ [reason]: trainingPreprocessing.removed_columns?.[reason] }, column) || "excluded during preprocessing"}
                             </li>
                           ))}
                         </ul>
@@ -2045,6 +2141,7 @@ export default function App() {
                       <div style={{ marginTop: "8px", color: "#526158", font: "13px/1.5 Arial, sans-serif" }}>
                         {Array.isArray(numericColumns) && <div><strong>Numeric columns prepared:</strong> {numericColumns.length ? numericColumns.join(", ") : "None"}</div>}
                         {Array.isArray(categoricalColumns) && <div><strong>Categorical columns prepared:</strong> {categoricalColumns.length ? categoricalColumns.join(", ") : "None"}</div>}
+                        {Array.isArray(dateColumns) && <div><strong>Date columns parsed:</strong> {dateColumns.length ? dateColumns.join(", ") : "None"}</div>}
                       </div>
                     )}
                     {encoderEntries.length > 0 && (
@@ -2052,7 +2149,7 @@ export default function App() {
                         <strong>Encoders:</strong> {encoderEntries.map(([column, encoder]) => `${column} (${encoder.type})`).join(", ")}
                       </p>
                     )}
-                    {Array.isArray(encodedTargets) && encodedTargets.length > 0 && (
+                    {isClassificationTask && Array.isArray(encodedTargets) && encodedTargets.length > 0 && (
                       <p style={{ margin: "8px 0 0", color: "#526158", font: "13px/1.5 Arial, sans-serif" }}>
                         <strong>Target classes:</strong> {encodedTargets.join(", ")}
                       </p>
@@ -2094,7 +2191,7 @@ export default function App() {
                         <h4 style={{ margin: "14px 0 8px", fontSize: "14px" }}>Evaluation results returned</h4>
                         <div style={{ overflowX: "auto" }}>
                           <table style={{ width: "100%", borderCollapse: "collapse", textAlign: "left", font: "13px/1.5 Arial, sans-serif" }}>
-                            <thead><tr><th style={{ padding: "7px", borderBottom: "1px solid #dbe5de" }}>Model</th><th style={{ padding: "7px", borderBottom: "1px solid #dbe5de" }}>Final test metrics returned</th></tr></thead>
+                            <thead><tr><th style={{ padding: "7px", borderBottom: "1px solid #dbe5de" }}>Model</th><th style={{ padding: "7px", borderBottom: "1px solid #dbe5de" }}>{isClustering ? "Candidate sample metrics returned" : "Final test metrics returned"}</th></tr></thead>
                             <tbody>
                               {evaluationResults.map((result, index) => {
                                 const metricEntries = Object.entries(result.metrics || {}).filter(([, value]) => typeof value === "number" && Number.isFinite(value));
@@ -2116,6 +2213,33 @@ export default function App() {
                             </tbody>
                           </table>
                         </div>
+                        {isClustering && Object.keys(clusteringEvaluation).length > 0 && (
+                          <div style={{ marginTop: "12px", color: "#526158", font: "13px/1.6 Arial, sans-serif" }}>
+                            <strong>Selected model evaluation:</strong>{" "}
+                            {[
+                              ["Silhouette score", clusteringMetrics.silhouette_score],
+                              ["Calinski-Harabasz", clusteringMetrics.calinski_harabasz_score],
+                              ["Davies-Bouldin", clusteringMetrics.davies_bouldin_score],
+                            ].filter(([, value]) => typeof value === "number" && Number.isFinite(value))
+                              .map(([label, value]) => `${label}: ${formatPredictionMetric({ value, format: "number" })}`)
+                              .join("; ")}
+                            <div>{clusteringEvaluation.quality_assessment}</div>
+                            {clusterDistribution.length > 0 && (
+                              <div>
+                                <strong>Cluster sizes:</strong>{" "}
+                                {clusterDistribution.map((cluster) => (
+                                  `${cluster.cluster}: ${cluster.rows} (${formatPredictionMetric({ value: cluster.share, format: "percentage" })})`
+                                )).join("; ")}
+                                {Number(clusteringEvaluation.small_cluster_count) > 0
+                                  ? `; ${clusteringEvaluation.small_cluster_count} small cluster(s) are flagged for review`
+                                  : ""}
+                              </div>
+                            )}
+                            {clusteringEvaluation.selection_strategy && (
+                              <div>{clusteringEvaluation.selection_strategy}</div>
+                            )}
+                          </div>
+                        )}
                         {validationDiagnostics.length === 0 && evaluationResults.length < candidates.length && (
                           <p style={{ margin: "8px 0 0", color: "#66756b", font: "12px/1.5 Arial, sans-serif" }}>
                             Candidate-by-candidate validation scores were not included in this response; only the listed evaluation results are shown.
@@ -2468,6 +2592,23 @@ export default function App() {
                       ? "Assign a cluster"
                       : "Make a prediction"}
               </h2>
+              {trainedTabularModelId && (
+                <p
+                  role="status"
+                  style={{
+                    margin: "12px 0 0",
+                    padding: "10px 12px",
+                    border: "1px solid #cfe0d4",
+                    borderRadius: "6px",
+                    background: "#f8fbf8",
+                    color: "#526158",
+                    font: "13px/1.5 Arial, sans-serif",
+                    overflowWrap: "anywhere",
+                  }}
+                >
+                  Saved model ID: <strong>{trainedTabularModelId}</strong>
+                </p>
+              )}
               <div style={{ display: "flex", gap: "8px", marginTop: "16px", flexWrap: "wrap" }}>
                 {[{ value: "sample", label: "Use first row" }, { value: "new", label: "Enter values" }].map((option) => (
                   <button
@@ -2622,6 +2763,174 @@ export default function App() {
             )}
           </section>
         )}
+        <section
+          aria-label="Test Your Model"
+          style={{ ...panelStyle, marginTop: "20px", padding: "28px" }}
+        >
+          <div style={{ marginBottom: "18px" }}>
+            <p
+              style={{
+                margin: "0 0 8px",
+                color: "#8a988e",
+                fontFamily: "'Courier New', monospace",
+                fontSize: "11px",
+                letterSpacing: "0.1em",
+                textTransform: "uppercase",
+              }}
+            >
+              Saved tabular model
+            </p>
+            <h2 style={{ margin: 0, fontSize: "22px", fontWeight: 500 }}>
+              Test Your Model
+            </h2>
+            <p style={{ margin: "8px 0 0", color: "#66756b", font: "14px/1.5 Arial, sans-serif" }}>
+              Enter a Model ID and upload new CSV or XLSX rows. This loads the saved model and fitted preprocessing only; it does not train or refit anything. Required feature columns must be present, extra columns are ignored, and missing cell values use the saved training-time imputations.
+            </p>
+          </div>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+              gap: "14px 18px",
+              alignItems: "end",
+            }}
+          >
+            <label htmlFor="saved-model-id" style={{ font: "13px/1.4 Arial, sans-serif", color: "#526158" }}>
+              <span style={{ display: "block", marginBottom: "6px", fontWeight: 600 }}>Model ID</span>
+              <input
+                id="saved-model-id"
+                type="text"
+                value={savedModelIdInput}
+                onChange={(event) => {
+                  setSavedModelIdInput(event.target.value);
+                  setSavedModelPredictionState("idle");
+                  setSavedModelPredictionError("");
+                  setSavedModelPredictionResult(null);
+                }}
+                placeholder="automl_..."
+                autoComplete="off"
+                style={{
+                  width: "100%",
+                  boxSizing: "border-box",
+                  padding: "10px 11px",
+                  border: "1px solid #cbd8cf",
+                  borderRadius: "6px",
+                  background: "#fbfcfa",
+                  font: "14px Arial, sans-serif",
+                }}
+              />
+            </label>
+            <label htmlFor="saved-model-file" style={{ font: "13px/1.4 Arial, sans-serif", color: "#526158" }}>
+              <span style={{ display: "block", marginBottom: "6px", fontWeight: 600 }}>New prediction data</span>
+              <input
+                id="saved-model-file"
+                type="file"
+                accept=".csv,.xlsx"
+                onChange={(event) => {
+                  setSavedModelFile(event.target.files?.[0] || null);
+                  setSavedModelPredictionState("idle");
+                  setSavedModelPredictionError("");
+                  setSavedModelPredictionResult(null);
+                }}
+                style={{ width: "100%", font: "13px Arial, sans-serif" }}
+              />
+            </label>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleSavedModelFilePredict}
+            disabled={
+              savedModelPredictionState === "loading" ||
+              !savedModelIdInput.trim() ||
+              !savedModelFile
+            }
+            style={{
+              marginTop: "16px",
+              padding: "11px 18px",
+              border: 0,
+              borderRadius: "6px",
+              background: savedModelPredictionState === "loading" ? "#7f9a89" : "#1e6041",
+              color: "#ffffff",
+              cursor: savedModelPredictionState === "loading" ? "default" : "pointer",
+              font: "600 14px Arial, sans-serif",
+            }}
+          >
+            {savedModelPredictionState === "loading" ? "Testing saved model..." : "Test saved model"}
+          </button>
+
+          {savedModelPredictionState === "error" && (
+            <p role="alert" style={{ margin: "12px 0 0", color: "#a13d35", font: "14px/1.5 Arial, sans-serif" }}>
+              {savedModelPredictionError}
+            </p>
+          )}
+
+          {savedModelPredictionState === "success" && savedModelPredictionResult && (
+            <div style={{ marginTop: "20px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+                <p style={{ margin: 0, color: "#526158", font: "14px/1.5 Arial, sans-serif" }}>
+                  {savedModelPredictionResult.prediction_count} rows processed with{" "}
+                  <strong>{savedModelPredictionResult.model_name || "saved model"}</strong>
+                  {" · "}{savedModelPredictionResult.model_id}
+                </p>
+                <button
+                  type="button"
+                  onClick={downloadSavedModelPredictions}
+                  style={{
+                    padding: "9px 13px",
+                    border: "1px solid #1e6041",
+                    borderRadius: "6px",
+                    background: "#ffffff",
+                    color: "#1e6041",
+                    cursor: "pointer",
+                    font: "600 13px Arial, sans-serif",
+                  }}
+                >
+                  Download results CSV
+                </button>
+              </div>
+              <div style={{ marginTop: "12px", overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", textAlign: "left", font: "13px/1.5 Arial, sans-serif" }}>
+                  <thead>
+                    <tr>
+                      <th style={{ padding: "8px", borderBottom: "1px solid #dbe5de" }}>Row</th>
+                      <th style={{ padding: "8px", borderBottom: "1px solid #dbe5de" }}>
+                        {String(savedModelPredictionResult.problem_type || "").toLowerCase().includes("cluster")
+                          ? "Cluster assignment"
+                          : String(savedModelPredictionResult.problem_type || "").toLowerCase().includes("regression")
+                            ? "Predicted value"
+                            : "Predicted class"}
+                      </th>
+                      {savedModelPredictionResult.probabilities && (
+                        <th style={{ padding: "8px", borderBottom: "1px solid #dbe5de" }}>Class probabilities</th>
+                      )}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {savedModelPredictionResult.predictions.map((prediction, index) => (
+                      <tr key={index}>
+                        <td style={{ padding: "8px", borderBottom: "1px solid #edf2ee" }}>{index + 1}</td>
+                        <td style={{ padding: "8px", borderBottom: "1px solid #edf2ee", fontWeight: 600 }}>
+                          {savedModelPredictionResult.prediction_labels?.[index] ?? String(prediction)}
+                        </td>
+                        {savedModelPredictionResult.probabilities && (
+                          <td style={{ padding: "8px", borderBottom: "1px solid #edf2ee" }}>
+                            {savedModelPredictionResult.probabilities[index]?.map((value, probabilityIndex) => (
+                              <span key={probabilityIndex} style={{ display: "inline-block", marginRight: "12px" }}>
+                                {savedModelPredictionResult.probability_labels?.[probabilityIndex] || `Class ${probabilityIndex + 1}`}: {(Number(value) * 100).toFixed(1)}%
+                              </span>
+                            ))}
+                          </td>
+                        )}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </section>
           </div>
         ) : (
           <section

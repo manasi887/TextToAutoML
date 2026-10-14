@@ -64,6 +64,11 @@ def _summary(
             f"{trained_count} trained model(s); best model: {model_text} "
             f"selected by {metric_text}."
         )
+    if "clustering" in normalized:
+        return (
+            f"Clustering completed with {trained_count} prediction-compatible "
+            f"candidate model(s); selected model: {model_text} by {metric_text}."
+        )
     return (
         f"{problem_type} training for target '{target_text}' completed with "
         f"{trained_count} trained model(s); best model: {model_text} "
@@ -94,6 +99,9 @@ def generate_training_report(
     preprocessing = automl_training.get("preprocessing")
     if not isinstance(preprocessing, dict):
         preprocessing = {}
+    removed_columns = preprocessing.get("removed_columns")
+    if not isinstance(removed_columns, dict):
+        removed_columns = {}
     models = automl_training.get("models")
     if not isinstance(models, dict):
         models = {}
@@ -110,6 +118,11 @@ def generate_training_report(
     trained = _list_value(models.get("trained"))
     failed = _list_value(models.get("failed"))
     raw_feature_names = _list_value(preprocessing.get("raw_feature_names"))
+    retained_features = _list_value(preprocessing.get("retained_features"))
+    excluded_features = _list_value(preprocessing.get("excluded_features"))
+    clustering_evaluation = preprocessing.get("clustering_evaluation")
+    if not isinstance(clustering_evaluation, dict):
+        clustering_evaluation = {}
     best_name = best_model.get("name")
     selection_metric = best_model.get("selection_metric")
     if best_name is not None:
@@ -144,6 +157,13 @@ def generate_training_report(
             "training_rows": _non_negative_int(dataset.get("training_rows")),
             "test_rows": _non_negative_int(dataset.get("test_rows")),
         },
+        "features": {
+            "retained": _json_safe(retained_features),
+            "excluded": _json_safe(excluded_features),
+            "target_or_group_exclusions": _json_safe(
+                _list_value(removed_columns.get("target_columns"))
+            ),
+        },
         "models": {
             "trained": len(trained),
             "failed": len(failed),
@@ -167,4 +187,6 @@ def generate_training_report(
             "failed_model_count": len(failed),
         },
     }
+    if "clustering" in problem_type.lower() and clustering_evaluation:
+        report["clustering"] = _json_safe(clustering_evaluation)
     return _json_safe(report)

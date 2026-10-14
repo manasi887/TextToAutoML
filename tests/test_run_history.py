@@ -167,3 +167,61 @@ def test_run_history_persists_optional_optimizer_decision_and_keeps_legacy_recor
     assert record["optimizer_decision"] == decision
     assert history[1]["optimizer_decision"]["selected_strategy"] == "random"
     json.dumps(history, allow_nan=False)
+
+
+def test_clustering_run_history_does_not_claim_cross_run_score_improvements(tmp_path):
+    history_path = tmp_path / "training_history.json"
+    dataframe = pd.DataFrame({"usage": [1, 2, 3, 4]})
+    output = {
+        "model": {"model_id": "cluster_run"},
+        "target_column": None,
+        "problem_type": "Clustering",
+        "best_model": {
+            "name": "KMeans_k2",
+            "selection_metric": "silhouette_score",
+            "metrics": {
+                "silhouette_score": 0.2,
+                "calinski_harabasz_score": 10.0,
+                "davies_bouldin_score": 0.8,
+            },
+            "selection_metrics": {"silhouette_score": 0.25},
+        },
+        "preprocessing": {
+            "clustering_evaluation": {
+                "quality_assessment": "Positive silhouette; business review required."
+            }
+        },
+    }
+
+    run_history.record_training_run(
+        dataframe,
+        output,
+        dataset_name="segments.csv",
+        history_path=history_path,
+    )
+    second_output = {
+        **output,
+        "model": {"model_id": "cluster_run_2"},
+        "best_model": {
+            **output["best_model"],
+            "metrics": {
+                **output["best_model"]["metrics"],
+                "silhouette_score": 0.4,
+            },
+        },
+    }
+    record, comparison = run_history.record_training_run(
+        dataframe,
+        second_output,
+        dataset_name="segments.csv",
+        history_path=history_path,
+    )
+
+    assert comparison["status"] == "not_comparable"
+    assert comparison["metric_delta"] is None
+    assert "selection_metrics" in record
+    history = json.loads(history_path.read_text(encoding="utf-8"))
+    assert history[0]["clustering_evaluation"]["quality_assessment"].startswith(
+        "Positive silhouette"
+    )
+    json.dumps(history, allow_nan=False)

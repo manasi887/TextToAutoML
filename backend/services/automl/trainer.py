@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -511,83 +512,116 @@ def prepare_clustering_data(
     excluded_target_columns: List[str] | None = None,
     feature_columns: List[str] | None = None,
 ) -> Dict[str, object]:
-      """Prepare feature data for unsupervised clustering without a target column."""
-      if not isinstance(df, pd.DataFrame):
-          raise TypeError("df must be a pandas DataFrame")
-      if df.empty:
-          raise ValueError("Input dataset is empty.")
-      if feature_columns is not None:
-          if not isinstance(feature_columns, list) or any(not isinstance(column, str) for column in feature_columns):
-              raise ValueError("feature_columns must be a list of column names.")
-          missing_columns = [column for column in feature_columns if column not in df.columns]
-          if missing_columns:
-              raise ValueError(f"Feature column(s) not present in the DataFrame: {', '.join(missing_columns)}")
+    """Prepare mixed-type features and retain a fitted prediction transform."""
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("df must be a pandas DataFrame")
+    if df.empty:
+        raise ValueError("Input dataset is empty.")
+    if not df.columns.is_unique:
+        raise ValueError("Clustering requires unique dataset column names.")
+    if feature_columns is not None:
+        if not isinstance(feature_columns, list) or any(not isinstance(column, str) for column in feature_columns):
+            raise ValueError("feature_columns must be a list of column names.")
+        missing_columns = [column for column in feature_columns if column not in df.columns]
+        if missing_columns:
+            raise ValueError(f"Feature column(s) not present in the DataFrame: {', '.join(missing_columns)}")
 
-      working_df = df.copy()
-      from services.dataset.intelligence import detect_identifier_columns, detect_constant_columns
+    excluded_targets = [
+        column for column in dict.fromkeys(excluded_target_columns or [])
+        if column in df.columns
+    ]
+    candidates = (
+        list(dict.fromkeys(feature_columns))
+        if feature_columns is not None
+        else df.columns.tolist()
+    )
+    candidates = [column for column in candidates if column not in excluded_targets]
+    raw_features = df.loc[:, candidates].copy()
 
-      identifier_cols = detect_identifier_columns(working_df).get("identifier_columns", [])
-      constant_cols = detect_constant_columns(working_df).get("constant_columns", [])
-      excluded_target_columns = [
-          column
-          for column in excluded_target_columns or []
-          if column in working_df.columns
-      ]
-      columns_to_drop = list(dict.fromkeys(
-          column
-          for column in identifier_cols + constant_cols + excluded_target_columns
-          if column in working_df.columns
-      ))
-      if feature_columns is None:
-          X = working_df.drop(columns=columns_to_drop, errors="ignore")
-      else:
-          selected_columns = list(dict.fromkeys(
-              column for column in feature_columns if column not in columns_to_drop
-          ))
-          X = working_df.loc[:, selected_columns].copy()
+    from .clustering_preprocessing import ClusteringPreprocessor
 
-      numeric_columns = X.select_dtypes(include=["number"]).columns.tolist()
-      numeric_imputation_values: Dict[str, float] = {}
-      for column in numeric_columns:
-          if X[column].isna().any():
-              fill_value = float(X[column].mean())
-              X[column] = X[column].fillna(fill_value)
-              numeric_imputation_values[column] = fill_value
+    preprocessor = ClusteringPreprocessor().fit(raw_features)
+    encoded_features = preprocessor.transform(raw_features).reset_index(drop=True)
+    if encoded_features.empty or encoded_features.shape[1] == 0:
+        raise ValueError("No usable features remain for clustering after preprocessing.")
 
-      categorical_columns = X.select_dtypes(include=["object", "string", "category"]).columns.tolist()
-      categorical_imputation_values: Dict[str, Any] = {}
-      for column in categorical_columns:
-          if X[column].isna().any():
-              mode_values = X[column].mode(dropna=True)
-              fill_value = mode_values.iloc[0] if not mode_values.empty else "<missing>"
-              X[column] = X[column].fillna(fill_value)
-              categorical_imputation_values[column] = fill_value
+    excluded = preprocessor.excluded_features_
+    identifier_columns = [
+        item["column"]
+        for item in excluded
+        if item["reason"] == "likely identifier or near-unique key"
+    ]
+    constant_columns = [
+        item["column"] for item in excluded if item["reason"] == "constant column"
+    ]
+    clustering_label_columns = [
+        item["column"]
+        for item in excluded
+        if item["reason"] in {
+            "target, outcome, segment, or existing cluster label",
+            "binary outcome-like column",
+        }
+    ]
+    numeric_columns = [
+        column for column, kind in preprocessor.feature_types_.items()
+        if kind == "numeric"
+    ]
+    categorical_columns = [
+        column for column, kind in preprocessor.feature_types_.items()
+        if kind == "categorical"
+    ]
+    date_columns = [
+        column for column, kind in preprocessor.feature_types_.items()
+        if kind == "date"
+    ]
+    reported_exclusions = [
+        *excluded,
+        *[
+            {"column": column, "reason": "explicitly supplied target or group exclusion"}
+            for column in excluded_targets
+        ],
+    ]
 
-      encoded_X, encoders = encode_features(X)
-      return {
-          "X": encoded_X.reset_index(drop=True),
-          "feature_names": encoded_X.columns.tolist(),
-          "encoders": encoders,
-          "preprocessing": {
-              "removed_columns": {
-                  "identifier_columns": identifier_cols,
-                  "constant_columns": constant_cols,
-                  "target_columns": excluded_target_columns,
-              },
-              "imputed_columns": {
-                  "numeric": numeric_columns,
-                  "categorical": categorical_columns,
-              },
-              "raw_feature_names": X.columns.tolist(),
-              "imputation_values": {
-                  "numeric": numeric_imputation_values,
-                  "categorical": categorical_imputation_values,
-              },
-              "target_column": None,
-              "excluded_target_columns": excluded_target_columns,
-              "target_encoded": False,
-          },
-      }
+    return {
+        "X": encoded_features,
+        "feature_names": encoded_features.columns.tolist(),
+        "encoders": {},
+        "preprocessing": {
+            "removed_columns": {
+                "identifier_columns": identifier_columns,
+                "constant_columns": constant_columns,
+                "target_columns": excluded_targets,
+                "clustering_label_columns": clustering_label_columns,
+                "other_excluded_columns": [
+                    item["column"] for item in excluded
+                    if item["column"] not in identifier_columns
+                    and item["column"] not in constant_columns
+                    and item["column"] not in clustering_label_columns
+                ],
+            },
+            "imputed_columns": {
+                "numeric": numeric_columns,
+                "categorical": categorical_columns,
+                "date": date_columns,
+            },
+            "raw_feature_names": preprocessor.retained_features_,
+            "feature_metadata": preprocessor.feature_metadata_,
+            "retained_features": [
+                {"column": column, "type": preprocessor.feature_types_[column]}
+                for column in preprocessor.retained_features_
+            ],
+            "excluded_features": reported_exclusions,
+            "clustering_preprocessor": preprocessor,
+            "inference_policy": {
+                "missing_feature_columns": "impute with fitted training statistics or missing-category handling",
+                "extra_feature_columns": "ignored; only saved training features are transformed",
+                "unseen_categories": "encoded as all-zero category indicators",
+            },
+            "target_column": None,
+            "excluded_target_columns": excluded_targets,
+            "target_encoded": False,
+        },
+    }
 
 
 def _fill_missing_values(df: pd.DataFrame) -> None:

@@ -326,7 +326,8 @@ def test_recommend_models_for_clustering():
 
     assert report["status"] == "Completed"
     assert any("K-Means" in item for item in report["recommended_models"])
-    assert any("DBSCAN" in item for item in report["recommended_models"])
+    assert any("BIRCH" in item for item in report["recommended_models"])
+    assert all("DBSCAN" not in item for item in report["recommended_models"])
 
 
 def test_generate_automl_recommendation_compiles_report():

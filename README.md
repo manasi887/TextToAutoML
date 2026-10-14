@@ -26,11 +26,11 @@ Instead of requiring users to manually determine the machine learning problem, s
 | Model Selection |  Implemented |
 | Model Persistence |  Implemented |
 | Prediction API |  Implemented |
+| Clustering Training |  Implemented |
 | Training-Time Estimation |  Implemented |
 | Training Report |  Implemented |
 | React Frontend |  Implemented |
 | NLP → AutoML Integration |  Implemented |
-| Clustering Training | ⏳ Planned |
 | BART User-Facing Explanation | ⏳ Planned |
 
 ---
@@ -196,6 +196,7 @@ TextToAutoML is divided into several major layers.
 │ /nlp/train                                          │
 │ /train/                                              │
 │ /predict/                                            │
+│ /predict/file                                        │
 └────────────────┬────────────────────┬───────────────┘
                  │                    │
                  ▼                    ▼
@@ -623,17 +624,29 @@ Creation timestamp
 ```
 
 This allows the saved model to be reused later for predictions.
+Tabular packages include the fitted feature encoders, imputation values, feature
+schema, selected model parameters, training configuration, and metrics. They are
+stored in `storage/models/`, which is mounted as persistent storage by the
+provided Docker Compose configuration. Existing packages in the former
+`backend/storage/models/` location remain readable.
 
 ---
 
 #  Prediction
 
-The prediction API accepts:
+The prediction API accepts a Model ID and either new input records or an uploaded
+CSV/XLSX file. In the frontend, use **Test Your Model** to enter an ID and select
+the file.
 
-- Model ID
-- New input records
+The backend loads the saved package and applies its fitted preprocessing and
+model directly; prediction does not train, select a model, or refit preprocessing.
+The uploaded file must include every required feature column. Extra columns are
+ignored, feature order follows the saved schema, missing cell values use saved
+training-time imputations, and categorical encoders handle values not seen in
+training. Classification labels and regression values are returned with the
+prediction rows; clustering returns assignments from the saved fitted clusterer.
 
-The system loads the saved model and applies the same preprocessing configuration used during training.
+The result table can be downloaded as a CSV.
 
 The prediction response can contain:
 
@@ -782,24 +795,28 @@ Intent:
 clustering
 ```
 
-However, the current AutoML training layer does **not yet implement clustering model training**.
-
-Currently supported AutoML training types are:
+The AutoML training layer supports:
 
 ```text
 Binary Classification
 Multi-class Classification
 Regression
+Clustering (K-Means and BIRCH)
 ```
 
-Therefore, clustering is currently supported at the **NLP/task-recognition level**, while clustering training remains future scope.
+K-Means and BIRCH candidates compare counts from two through the square-root
+of the sample size, subject to a documented 12-count search cap, on the same
+deterministic sample using silhouette, Calinski-Harabasz, and Davies-Bouldin
+ranks. Mixed-type clustering
+uses robust-scaled numeric and date features, one-hot nominal categories, and a
+persisted transform for Model ID prediction. DBSCAN and agglomerative clustering
+are not offered as prediction-compatible models because they do not directly
+assign unseen records through the current saved-model API.
 
 Potential future algorithms include:
 
 ```text
-K-Means
-DBSCAN
-Agglomerative Clustering
+Other prediction-compatible density and hierarchical methods
 ```
 
 ---
@@ -817,6 +834,7 @@ The backend is implemented using **FastAPI**.
 | `/nlp/train`          | POST     | Resolve NLP request and train AutoML |
 | `/train/`             | POST     | Direct AutoML training               |
 | `/predict/`           | POST     | Generate predictions                 |
+| `/predict/file`       | POST     | Predict CSV/XLSX rows with a saved model |
 | `/report/`            | GET/POST | Training report functionality        |
 
 FastAPI also provides interactive API documentation through Swagger UI.
@@ -844,7 +862,9 @@ View Intent / Target / Problem Type
       ↓
 Confirm and Train
       ↓
-View Training Result
+View Training Result and Model ID
+      ↓
+Test Your Model with new CSV/XLSX data
 ```
 
 The interface also handles clarification requests.
@@ -874,7 +894,8 @@ FastAPI
      ├── /nlp/analyze
      ├── /nlp/train
      ├── /train/
-     └── /predict/
+     ├── /predict/
+     └── /predict/file
 ```
 
 ---
@@ -1176,7 +1197,12 @@ Therefore, the estimate should be treated as approximate.
 
 ## Clustering
 
-Clustering is recognized by the NLP layer but is not yet implemented in the AutoML training layer.
+Clustering compares prediction-compatible K-Means and BIRCH configurations.
+Saved model IDs reuse the fitted mixed-type preprocessing and clusterer to
+assign new compatible CSV/XLSX data without fitting encoders, scalers, or
+cluster models at inference time. Reports include retained/excluded feature
+reasons, complementary cluster metrics, cluster sizes, and the limitations of
+geometric cluster-quality scores.
 
 ## BART
 
@@ -1192,8 +1218,7 @@ Target matching currently relies on deterministic matching techniques and may re
 
 Future development can extend TextToAutoML with:
 
-- Full clustering support
-- K-Means / DBSCAN / Agglomerative Clustering
+- Additional prediction-compatible clustering algorithms
 - Improved NLP intent classification
 - Larger and more diverse intent datasets
 - Better confidence calibration

@@ -1104,10 +1104,12 @@ def test_candidate_validation_diagnostics_use_validation_not_holdout(monkeypatch
         validation["target"].tolist(),
         holdout["target"].tolist(),
     ]
+    assert "DecisionTreeClassifier__class_weight_balanced" in evaluation_models[1]
     assert evaluation_models[0]["LogisticRegression"] is evaluation_models[1]["LogisticRegression"]
     assert evaluation_models[0]["DecisionTreeClassifier"] is evaluation_models[1]["DecisionTreeClassifier"]
     assert evaluation_models[1]["DecisionTreeClassifier"].max_depth == 1
     diagnostics = {item["candidate_name"]: item for item in result["validation_diagnostics"]}
+    assert "DecisionTreeClassifier__class_weight_balanced" in diagnostics
     assert diagnostics["DecisionTreeClassifier"]["selection_value"] == 0.8
     assert diagnostics["DecisionTreeClassifier"]["weighted_f1"] == 0.7
     assert diagnostics["DecisionTreeClassifier"]["training_metrics"]["balanced_accuracy"] == 0.95

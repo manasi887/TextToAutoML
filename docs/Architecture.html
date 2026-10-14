@@ -55,7 +55,7 @@
       <tr><td><code>/upload/</code></td><td>Accepts tabular datasets and stores uploaded files.</td><td><code>backend/api/upload.py</code></td></tr>
       <tr><td><code>/nlp/analyze</code>, <code>/nlp/train</code>, <code>/nlp/diagnose-target-proxies</code></td><td>Resolves a natural-language task and target; optionally trains or diagnoses target leakage.</td><td><code>backend/api/nlp.py</code></td></tr>
       <tr><td><code>/nlp/route</code></td><td>Routes requests between supported workflow intents, including image workflows.</td><td><code>backend/api/nlp_routing.py</code></td></tr>
-      <tr><td><code>/train/</code>, <code>/predict/</code></td><td>Direct tabular training and persisted-model prediction.</td><td><code>backend/api/train.py</code>, <code>backend/api/predict.py</code></td></tr>
+      <tr><td><code>/train/</code>, <code>/predict/</code>, <code>/predict/file</code></td><td>Direct tabular training and persisted-model predictions from records or uploaded CSV/XLSX files.</td><td><code>backend/api/train.py</code>, <code>backend/api/predict.py</code></td></tr>
       <tr><td><code>/image/analyze</code>, <code>/image/train</code>, <code>/image/predict</code></td><td>Image ZIP inspection, image-classifier training, and single-image prediction.</td><td><code>backend/api/image_classification.py</code></td></tr>
       <tr><td><code>/health</code>, <code>/ready</code></td><td>Lightweight process/storage liveness and required intent-artifact readiness.</td><td><code>backend/main.py</code></td></tr>
     </tbody>
