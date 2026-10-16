@@ -17,7 +17,6 @@ The project combines a React frontend, a FastAPI backend, dataset intelligence, 
 | FLAN-T5-based result explanations | Implemented with factual fallback; model availability required for generated text |
 | Image ZIP analysis, classification training, and prediction | Implemented |
 | React frontend and Docker Compose deployment | Implemented |
-| BART-based explanation layer | Planned; not implemented |
 
 ## Workflows
 
@@ -223,8 +222,6 @@ The NLP training workflow returns a JSON-safe training report with task and targ
 
 After successful NLP training, the API builds an explanation from an allowlist of AutoML result facts and attempts to generate concise text with `google/flan-t5-small`. The model and tokenizer are loaded at runtime through Transformers; their weights are not bundled with the repository. If the model cannot be loaded or generation fails, the service returns deterministic factual text instead. JSON-like generated output also triggers that fallback. The implementation is therefore available in the workflow, but FLAN-T5-generated text depends on the model being obtainable at runtime.
 
-**BART integration is a separate planned feature and is not implemented.** It is not used by the current explanation workflow.
-
 ## Design principles
 
 - **Clarify rather than guess:** unknown or ambiguous intents and target matches should not silently start the wrong supervised task.
@@ -259,11 +256,10 @@ The tests cover areas including API workflows, NLP resolution and routing, train
 - Clustering metrics describe geometric separation, not domain-specific segment value.
 - Image classification is a dedicated classifier workflow, not general-purpose image understanding.
 - FLAN-T5 model weights are not bundled with the repository; when they cannot be loaded or generation fails, explanations use the deterministic factual fallback.
-- The BART explanation layer is not implemented and is not part of the current result-explanation workflow.
 
 ### Future scope
 
-Potential extensions, not claims of current support, include broader prediction-compatible clustering methods, improved and more diverse intent training data, more robust semantic target matching, expanded model families and optimization, richer visual reporting, model monitoring, and the planned BART-based explanation layer.
+Potential extensions, not claims of current support, include broader prediction-compatible clustering methods, improved and more diverse intent training data, more robust semantic target matching, expanded model families and optimization, richer visual reporting, and model monitoring.
 
 ## Additional documentation
 
