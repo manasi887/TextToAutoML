@@ -14,6 +14,7 @@ The project combines a React frontend, a FastAPI backend, dataset intelligence, 
 | Classification, regression, and clustering workflows | Implemented |
 | Tabular model persistence and Model ID prediction | Implemented |
 | Training reports and factual result explanations | Implemented |
+| FLAN-T5-based result explanations | Implemented with factual fallback; model availability required for generated text |
 | Image ZIP analysis, classification training, and prediction | Implemented |
 | React frontend and Docker Compose deployment | Implemented |
 | BART-based explanation layer | Planned; not implemented |
@@ -218,7 +219,11 @@ Image models use a separate package store under `storage/image_models/`. Use the
 
 Before tabular training, the NLP response may include a deterministic heuristic training-time range derived from row count, feature count, problem type, and candidate count. It is an approximation, not a runtime guarantee; actual duration depends on the data, hardware, and tuning path. Completed training also records measured duration.
 
-The NLP training workflow returns a JSON-safe training report with task and target, dataset and feature counts, trained/failed model counts, selected model, selection metric, evaluation metrics, Model ID, and warnings. Clustering reports also include clustering evaluation details. A result-explanation component uses `google/flan-t5-small` when available to explain supplied training facts and falls back to deterministic factual text if the model cannot be loaded. **A BART-based explanation layer remains planned and is not implemented.**
+The NLP training workflow returns a JSON-safe training report with task and target, dataset and feature counts, trained/failed model counts, selected model, selection metric, evaluation metrics, Model ID, and warnings. Clustering reports also include clustering evaluation details.
+
+After successful NLP training, the API builds an explanation from an allowlist of AutoML result facts and attempts to generate concise text with `google/flan-t5-small`. The model and tokenizer are loaded at runtime through Transformers; their weights are not bundled with the repository. If the model cannot be loaded or generation fails, the service returns deterministic factual text instead. JSON-like generated output also triggers that fallback. The implementation is therefore available in the workflow, but FLAN-T5-generated text depends on the model being obtainable at runtime.
+
+**BART integration is a separate planned feature and is not implemented.** It is not used by the current explanation workflow.
 
 ## Design principles
 
@@ -253,7 +258,8 @@ The tests cover areas including API workflows, NLP resolution and routing, train
 - Training-time estimates are heuristic, and model quality depends on dataset quality, task formulation, data split, and runtime environment.
 - Clustering metrics describe geometric separation, not domain-specific segment value.
 - Image classification is a dedicated classifier workflow, not general-purpose image understanding.
-- The BART explanation layer is not implemented; the current result explanation is separate and uses a FLAN-T5 model with a factual fallback.
+- FLAN-T5 model weights are not bundled with the repository; when they cannot be loaded or generation fails, explanations use the deterministic factual fallback.
+- The BART explanation layer is not implemented and is not part of the current result-explanation workflow.
 
 ### Future scope
 
