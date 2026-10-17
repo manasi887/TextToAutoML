@@ -253,6 +253,57 @@ test("Do not train a new model is a prediction override", () => {
   assert.equal(decision.ready, true);
 });
 
+test("prediction override blocks malformed image model IDs", () => {
+  const decision = predictionIntentOverride({
+    text: "Predict this image with my existing model.",
+    asset_type: "image",
+    image_available: true,
+    image_model_id: "../outside",
+  });
+
+  assert.equal(decision.intent, "IMAGE_PREDICTION");
+  assert.equal(decision.ready, false);
+  assert.deepEqual(decision.required_context, ["valid_image_model_id"]);
+  assert.match(decision.reason, /only letters, numbers, and underscores/);
+});
+
+test("unsupported object analysis is sent to backend routing instead of image prediction override", async () => {
+  const decision = await routeImageRequest(
+    {
+      text: "Identify all objects in this image",
+      asset_type: "image",
+      image_available: true,
+      image_model_id: "img_saved",
+    },
+    async (url) => {
+      assert.equal(url, "/nlp/route");
+      return mockResponse(JSON.stringify({
+        modality: "unknown",
+        intent: "UNKNOWN_AMBIGUOUS",
+        ready: false,
+        clarification_required: true,
+        reason: "Object-level image analysis is not supported.",
+        required_context: [],
+      }));
+    },
+  );
+
+  assert.equal(decision.intent, "UNKNOWN_AMBIGUOUS");
+  assert.equal(decision.ready, false);
+});
+
+test("top-K image requests bypass the image prediction override", () => {
+  assert.equal(
+    predictionIntentOverride({
+      text: "Show the top three classes for this image",
+      asset_type: "image",
+      image_available: true,
+      image_model_id: "img_saved",
+    }),
+    null,
+  );
+});
+
 test("a ZIP-backed image training request still uses the training route", async () => {
   const request = {
     text: "Train a CNN using this image dataset ZIP.",

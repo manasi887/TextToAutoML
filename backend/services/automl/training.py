@@ -72,7 +72,7 @@ _BAYESIAN_SEARCH_SPACES = {
     "DecisionTreeRegressor": {
         "criterion": {
             "kind": "categorical",
-            "choices": ["squared_error", "friedman_mse", "absolute_error"],
+            "choices": ["squared_error", "absolute_error"],
         },
         "max_depth": {"kind": "categorical", "choices": [None, 3, 5, 10, 20, 30]},
         "min_samples_split": {"kind": "int", "low": 2, "high": 20},
@@ -358,16 +358,39 @@ def evaluate_models(
                     ),
                 }
             elif "regression" in normalized_type:
-                predictions = model.predict(X_test)
+                y_true = pd.to_numeric(
+                    pd.Series(y_test), errors="raise"
+                ).to_numpy(dtype=float)
+                predictions = np.asarray(model.predict(X_test), dtype=float)
+                if predictions.ndim != 1 or len(predictions) != len(y_true):
+                    raise ValueError(
+                        "Regression predictions must contain one value for each evaluation row."
+                    )
+                if not np.isfinite(y_true).all():
+                    raise ValueError(
+                        "Regression evaluation targets must contain finite numeric values."
+                    )
+                if not np.isfinite(predictions).all():
+                    raise ValueError(
+                        "Regression predictions must contain finite numeric values."
+                    )
                 metrics = {
-                    "mae": float(mean_absolute_error(y_test, predictions)),
-                    "rmse": float(root_mean_squared_error(y_test, predictions)),
-                    "r2": float(r2_score(y_test, predictions)),
+                    "mae": float(mean_absolute_error(y_true, predictions)),
+                    "rmse": float(root_mean_squared_error(y_true, predictions)),
+                    "r2": float(r2_score(y_true, predictions)),
                 }
             elif "classification" in normalized_type:
                 predictions = model.predict(X_test)
                 y_true = np.asarray(y_test)
                 y_pred = np.asarray(predictions)
+                if y_true.ndim != 1 or y_pred.ndim != 1 or len(y_true) != len(y_pred):
+                    raise ValueError(
+                        "Classification predictions must contain one label for each evaluation row."
+                    )
+                if pd.isna(y_true).any() or pd.isna(y_pred).any():
+                    raise ValueError(
+                        "Classification evaluation targets and predictions must not contain missing labels."
+                    )
                 labels = np.unique(np.concatenate((y_true, y_pred)))
                 class_precision, class_recall, class_f1, class_support = (
                     precision_recall_fscore_support(

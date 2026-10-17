@@ -444,7 +444,7 @@ def test_bayesian_tuning_supports_classification_and_regression_metrics(monkeypa
     assert regression_result["status"] == "Completed"
     assert "rmse" in regression_result["metrics"]
     assert regression_result["model"].get_params()["criterion"] in {
-        "squared_error", "friedman_mse", "absolute_error"
+        "squared_error", "absolute_error"
     }
     assert regression_result["trials_run"] == 3
     assert [len(study.trials) for study in fake_optuna.studies] == [4, 3]

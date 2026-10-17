@@ -43,6 +43,10 @@ export function predictionIntentOverride(request) {
     request?.asset_type === "image_dataset" ||
     request?.image_available ||
     request?.image_dataset_available;
+  const unsupportedObjectAnalysis =
+    /\bobject\s+detection\b|\b(?:detect|count|locate|localize|segment)\s+(?:all\s+)?objects?\b|\bidentify\s+(?:all\s+)?objects?\b/i.test(text);
+  const topKRequest =
+    /\btop[-\s]?(?:k|[2-9]|\d{2,}|two|three|four|five|six|seven|eight|nine)\b/i.test(text);
   const predicts = /\b(?:predict|classify|recognize|identify)\b/i.test(text);
   const negatesTraining =
     /\b(?:do\s+not|don't|dont|never|not)\s+(?:train|retrain|build|create)\b|\bno\s+(?:new\s+)?(?:training|model)\b/i.test(text);
@@ -55,21 +59,41 @@ export function predictionIntentOverride(request) {
     /\bclassify\s+(?:this|that|the|selected|uploaded|single)\s+(?:image|photo|picture)\b/i.test(text) ||
     !/\b(?:train|retrain|build|create|fit)\b/i.test(text);
 
-  if (!imageContext || !predicts || !explicitlyPrediction || affirmativeTraining) return null;
+  if (
+    !imageContext ||
+    unsupportedObjectAnalysis ||
+    topKRequest ||
+    !predicts ||
+    !explicitlyPrediction ||
+    affirmativeTraining
+  ) {
+    return null;
+  }
 
   const requiredContext = [];
   if (!(request.image_available || request.asset_type === "image")) {
     requiredContext.push("image");
   }
-  if (!request.image_model_id?.trim()) requiredContext.push("image_model_id");
+  const modelId = request.image_model_id?.trim();
+  if (!modelId) {
+    requiredContext.push("image_model_id");
+  } else if (!/^[A-Za-z0-9_]+$/.test(modelId)) {
+    requiredContext.push("valid_image_model_id");
+  }
   return {
     modality: "image",
     intent: "IMAGE_PREDICTION",
     ready: requiredContext.length === 0,
     clarification_required: false,
-    reason: requiredContext.length
-      ? "A single image and a trained image model are required for image prediction."
-      : "Ready to route to image prediction.",
+    reason: requiredContext.includes("valid_image_model_id")
+      ? "Image model IDs may contain only letters, numbers, and underscores."
+      : requiredContext.length === 2
+        ? "A single image and a trained image model are required for image prediction."
+        : requiredContext.includes("image")
+          ? "A single image is required for image prediction."
+          : requiredContext.length
+            ? "A trained image model is required for image prediction."
+            : "Ready to route to image prediction.",
     required_context: requiredContext,
   };
 }

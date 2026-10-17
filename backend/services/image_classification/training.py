@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 from torchvision.models import MobileNet_V2_Weights
 
+from .dataset import validate_split_for_leakage
 from .model import build_mobilenet_v2_classifier
 
 
@@ -103,6 +104,21 @@ def train_image_classifier(
     """Train a small MobileNetV2 classifier on the extracted dataset and return metrics."""
     if not split.get("train") or not split.get("validation") or not split.get("test"):
         raise ValueError("Training, validation, and test split lists must all be present.")
+    for class_name in class_to_index:
+        missing_splits = [
+            split_name
+            for split_name in ("train", "validation", "test")
+            if not any(
+                image_labels.get(image_path) == class_name
+                for image_path in split[split_name]
+            )
+        ]
+        if missing_splits:
+            raise ValueError(
+                f"Class '{class_name}' has no readable images in the "
+                f"{', '.join(missing_splits)} split(s)."
+            )
+    validate_split_for_leakage(split, image_labels)
 
     random.seed(seed)
     np.random.seed(seed)

@@ -351,6 +351,26 @@ def run_automl_pipeline(
         ))
 
     normalized_problem_type = "Clustering" if str(problem_type or "").strip().lower() == "clustering" else _normalize_problem_type(problem_type, df, target_column)
+    if normalized_problem_type == "Regression":
+        raw_target = df[target_column]
+        numeric_target = pd.to_numeric(raw_target, errors="coerce")
+        invalid_target = raw_target.notna() & numeric_target.isna()
+        if invalid_target.any():
+            raise ValueError(
+                f"Regression target column '{target_column}' must contain numeric values."
+            )
+        if not np.isfinite(numeric_target.dropna().to_numpy(dtype=float)).all():
+            raise ValueError(
+                f"Regression target column '{target_column}' must contain finite numeric values."
+            )
+        if numeric_target.notna().sum() == 0:
+            raise ValueError(
+                f"Regression target column '{target_column}' must contain at least one numeric value."
+            )
+        if not pd.api.types.is_numeric_dtype(raw_target.dtype):
+            df = df.copy()
+            df[target_column] = numeric_target
+
     normalized_tuning_strategy = str(tuning_strategy or "").strip().lower()
     if normalized_tuning_strategy not in {"grid", "bayesian", "auto"}:
         raise ValueError("tuning_strategy must be 'grid', 'bayesian', or 'auto'.")

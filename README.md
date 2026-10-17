@@ -34,7 +34,7 @@ Clustering does not require a supervised target column. Its pipeline prepares mi
 
 ### Image classification
 
-The image workflow accepts a ZIP image dataset with class folders, analyzes its structure, trains a MobileNetV2 classifier, saves a model package, and predicts the class of an uploaded image with a saved image Model ID. The image workflow is separate from tabular AutoML.
+The image workflow accepts a ZIP image dataset with class folders, reports file counts and validation details during preflight, trains a MobileNetV2 classifier, saves a model package, and predicts the class of an uploaded image with a saved image Model ID. Unsupported and unreadable files are reported and skipped. Byte-identical images are detected with SHA-256; conflicting labels and duplicates across supplied train/validation/test partitions block training. Re-encoded or perceptually similar images are not detected. The image workflow is separate from tabular AutoML.
 
 ## Architecture
 

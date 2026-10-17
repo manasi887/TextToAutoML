@@ -64,14 +64,14 @@ client = TestClient(app)
             "Analyze this image dataset",
             {"asset_type": "image_dataset"},
             "IMAGE_DATASET_ANALYSIS",
-            False,
+            True,
             [],
         ),
         (
             "Tell me about this image dataset",
             {"asset_type": "image_dataset"},
             "IMAGE_DATASET_ANALYSIS",
-            False,
+            True,
             [],
         ),
         (

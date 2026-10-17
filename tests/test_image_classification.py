@@ -85,6 +85,36 @@ def _write_raw_image_entries(path: Path, entries):
             archive.writestr(member_name, image_bytes)
 
 
+def _write_segmentation_layout_zip(path: Path, *, conflicting_training_label: bool = False):
+    entries = []
+    train_images = {}
+    for class_index, class_name in enumerate(("buildings", "forest")):
+        for index in range(3):
+            contents = _encoded_image_bytes(
+                color=(20 + class_index * 100 + index * 15, 30 + index * 20, 40)
+            )
+            train_images[(class_name, index)] = contents
+            image_name = (
+                "17378.jpg"
+                if class_name == "forest" and index == 0
+                else f"{index}.jpg"
+            )
+            entries.append((
+                f"seg_train/seg_train/{class_name}/{image_name}",
+                contents,
+            ))
+    if conflicting_training_label:
+        entries.append((
+            "seg_train/seg_train/forest/conflicting.jpg",
+            train_images[("buildings", 0)],
+        ))
+    entries.extend([
+        ("seg_test/seg_test/buildings/20057.jpg", _encoded_image_bytes(color=(210, 20, 30))),
+        ("seg_pred/seg_pred/10225.jpg", train_images[("forest", 0)]),
+    ])
+    _write_raw_image_entries(path, entries)
+
+
 def _write_presplit_duplicate_zip(path: Path, *, duplicate_across_splits: bool):
     split_names = ("train", "validation", "test")
     classes = ("cats", "dogs")
@@ -98,7 +128,7 @@ def _write_presplit_duplicate_zip(path: Path, *, duplicate_across_splits: bool):
             )
             encoded[(split_name, class_name)] = _encoded_image_bytes(color=color)
     if duplicate_across_splits:
-        encoded[("test", "dogs")] = encoded[("train", "cats")]
+        encoded[("test", "cats")] = encoded[("train", "cats")]
     _write_raw_image_entries(
         path,
         [
@@ -136,11 +166,19 @@ def _write_pre_split_images_to_zip(
         class_counts.pop(missing_split)
 
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for split_name, classes in class_counts.items():
-            for class_name, count in classes.items():
+        for split_index, (split_name, classes) in enumerate(class_counts.items()):
+            for class_index, (class_name, count) in enumerate(classes.items()):
                 for index in range(count):
                     image_bytes = io.BytesIO()
-                    Image.new("RGB", (16, 16), color=(index * 20, 30, 40)).save(
+                    Image.new(
+                        "RGB",
+                        (16, 16),
+                        color=(
+                            20 + split_index * 60 + class_index * 25 + index * 7,
+                            25 + split_index * 50 + class_index * 30 + index * 9,
+                            30 + split_index * 40 + class_index * 35 + index * 11,
+                        ),
+                    ).save(
                         image_bytes, format="JPEG"
                     )
                     prefix = f"{wrapper}/" if wrapper else ""
@@ -159,7 +197,9 @@ def test_valid_zip_dataset_is_accepted(tmp_path):
     assert summary["class_names"] == ["cat", "dog"]
     assert summary["class_to_index"] == {"cat": 0, "dog": 1}
     assert summary["image_count"] == 8
+    assert summary["valid_image_count"] == 8
     assert summary["per_class_counts"] == {"cat": 4, "dog": 4}
+    assert summary["unique_per_class_counts"] == {"cat": 4, "dog": 4}
     assert summary["predefined_split"] is None
 
 
@@ -173,14 +213,253 @@ def test_multiple_class_folders_are_discovered_and_mapping_is_deterministic(tmp_
     assert summary["class_to_index"] == {"cat": 0, "dog": 1, "zebra": 2}
 
 
-def test_unsupported_and_corrupt_images_are_rejected(tmp_path):
+def test_unsupported_and_corrupt_images_are_reported_as_skipped(tmp_path):
     archive_path = tmp_path / "dataset.zip"
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("dataset/cat/first.gif", b"not-real-gif")
-        archive.writestr("dataset/dog/second.jpg", b"not-a-jpeg")
+        for class_name in ("cat", "dog"):
+            for index in range(3):
+                archive.writestr(
+                    f"dataset/{class_name}/{index}.jpg",
+                    _encoded_image_bytes(color=(index * 30 + (class_name == "dog") * 100, 20, 40)),
+                )
+        archive.writestr("dataset/cat/unsupported.gif", b"not-real-gif")
+        archive.writestr("dataset/dog/corrupt.jpg", b"not-a-jpeg")
 
-    with pytest.raises(ValueError, match="unsupported|corrupt|image"):
-        validate_zip_dataset(archive_path)
+    extracted_root, summary = extract_zip_dataset(archive_path)
+    try:
+        report = image_api.analyze_extracted_dataset(
+            extracted_root,
+            summary,
+            archive_size_bytes=archive_path.stat().st_size,
+        )
+
+        assert summary["total_file_count"] == 8
+        assert summary["valid_image_count"] == 6
+        assert summary["skipped_file_count"] == 2
+        assert {item["path"] for item in summary["skipped_files"]} == {
+            "dataset/cat/unsupported.gif",
+            "dataset/dog/corrupt.jpg",
+        }
+        assert report["quality"]["validation"] == "passed"
+        assert report["dataset"]["skipped_file_count"] == 2
+        assert any("unsupported file type" in item["reason"] for item in report["dataset"]["skipped_files"])
+        assert any("corrupt or unreadable image" in item["reason"] for item in report["dataset"]["skipped_files"])
+    finally:
+        shutil.rmtree(extracted_root, ignore_errors=True)
+
+
+def test_same_class_duplicate_images_are_deduplicated_for_training(tmp_path):
+    archive_path = tmp_path / "same_class_duplicates.zip"
+    image_a = _encoded_image_bytes(color=(10, 20, 30))
+    image_b = _encoded_image_bytes(color=(40, 50, 60))
+    image_c = _encoded_image_bytes(color=(70, 80, 90))
+    dog_images = [
+        _encoded_image_bytes(color=(110, 20, 30)),
+        _encoded_image_bytes(color=(140, 50, 60)),
+        _encoded_image_bytes(color=(170, 80, 90)),
+    ]
+    entries = [
+        ("dataset/cats/a.jpg", image_a),
+        ("dataset/cats/a-copy.jpg", image_a),
+        ("dataset/cats/b.jpg", image_b),
+        ("dataset/cats/c.jpg", image_c),
+        *[(f"dataset/dogs/{index}.jpg", contents) for index, contents in enumerate(dog_images)],
+    ]
+    _write_raw_image_entries(archive_path, entries)
+    original_bytes = archive_path.read_bytes()
+
+    extracted_root, summary = extract_zip_dataset(archive_path)
+    try:
+        assert summary["per_class_counts"] == {"cats": 4, "dogs": 3}
+        assert summary["unique_per_class_counts"] == {"cats": 3, "dogs": 3}
+        assert len(summary["images_by_class"]["cats"]) == 3
+        assert len(summary["source_images_by_class"]["cats"]) == 4
+        assert summary["duplicate_group_count"] == 1
+        split = split_dataset(summary, seed=42)
+        assert all(len(paths) == 2 for paths in split.values())
+        assert len(set().union(*map(set, split.values()))) == 6
+    finally:
+        shutil.rmtree(extracted_root, ignore_errors=True)
+
+    assert archive_path.read_bytes() == original_bytes
+
+
+def test_same_class_duplicates_within_provided_split_are_deduplicated(tmp_path):
+    archive_path = tmp_path / "provided_split_duplicates.zip"
+    entries = []
+    source_image = None
+    for split_index, split_name in enumerate(("train", "validation", "test")):
+        for class_index, class_name in enumerate(("cats", "dogs")):
+            contents = _encoded_image_bytes(
+                color=(20 + split_index * 60 + class_index * 30, 30, 40)
+            )
+            entries.append((f"{split_name}/{class_name}/image.jpg", contents))
+            if split_name == "train" and class_name == "cats":
+                source_image = contents
+    assert source_image is not None
+    entries.append(("train/cats/copy.jpg", source_image))
+    _write_raw_image_entries(archive_path, entries)
+
+    extracted_root, summary = extract_zip_dataset(archive_path)
+    try:
+        assert len(summary["predefined_split"]["train"]) == 2
+        assert len(summary["predefined_split"]["validation"]) == 2
+        assert len(summary["predefined_split"]["test"]) == 2
+        assert summary["duplicate_group_count"] == 1
+        report = image_api.analyze_extracted_dataset(
+            extracted_root,
+            summary,
+            archive_size_bytes=archive_path.stat().st_size,
+        )
+        assert report["quality"]["validation"] == "passed"
+        assert report["splits"]["per_class_counts"]["cats"] == {
+            "train": 1,
+            "validation": 1,
+            "test": 1,
+        }
+    finally:
+        shutil.rmtree(extracted_root, ignore_errors=True)
+
+
+def test_segmentation_layout_excludes_unlabeled_folders_before_duplicate_checks(tmp_path):
+    archive_path = tmp_path / "segmentation_layout.zip"
+    _write_segmentation_layout_zip(archive_path)
+
+    extracted_root, summary = extract_zip_dataset(archive_path)
+    try:
+        assert summary["class_names"] == ["buildings", "forest"]
+        assert summary["image_count"] == 6
+        assert summary["valid_image_count"] == 8
+        assert summary["excluded_image_counts"] == {"seg_test": 1, "seg_pred": 1}
+        assert summary["duplicate_group_count"] == 0
+        forest_training_image = (
+            extracted_root / "seg_train" / "seg_train" / "forest" / "17378.jpg"
+        )
+        prediction_image = extracted_root / "seg_pred" / "seg_pred" / "10225.jpg"
+        assert forest_training_image.read_bytes() == prediction_image.read_bytes()
+        assert all(
+            Path(image_path).relative_to(extracted_root).parts[:2]
+            == ("seg_train", "seg_train")
+            for paths in summary["images_by_class"].values()
+            for image_path in paths
+        )
+        assert all(
+            Path(image_path).relative_to(extracted_root).parts[0]
+            not in {"seg_test", "seg_pred"}
+            for image_path in summary["image_labels"]
+        )
+        split = split_dataset(summary)
+        assert all(
+            Path(image_path).relative_to(extracted_root).parts[0] == "seg_train"
+            for paths in split.values()
+            for image_path in paths
+        )
+        report = image_api.analyze_extracted_dataset(
+            extracted_root,
+            summary,
+            archive_size_bytes=archive_path.stat().st_size,
+        )
+        assert report["quality"]["validation"] == "passed"
+        assert report["dataset"]["excluded_image_counts"] == {
+            "seg_test": 1,
+            "seg_pred": 1,
+        }
+    finally:
+        shutil.rmtree(extracted_root, ignore_errors=True)
+
+
+def test_segmentation_layout_still_rejects_conflicting_labeled_classes(tmp_path):
+    archive_path = tmp_path / "segmentation_training_conflict.zip"
+    _write_segmentation_layout_zip(
+        archive_path,
+        conflicting_training_label=True,
+    )
+
+    with pytest.raises(ValueError, match="conflicting class labels") as error:
+        extract_zip_dataset(archive_path)
+
+    message = str(error.value)
+    assert "seg_train/seg_train/buildings/0.jpg" in message
+    assert "seg_train/seg_train/forest/conflicting.jpg" in message
+
+
+def test_byte_identical_images_with_conflicting_class_labels_report_both_files(tmp_path):
+    archive_path = tmp_path / "conflicting_labels.zip"
+    duplicate = _encoded_image_bytes(color=(10, 20, 30))
+    _write_raw_image_entries(
+        archive_path,
+        [
+            ("dataset/cats/cat-copy.jpg", duplicate),
+            ("dataset/dogs/dog-copy.jpg", duplicate),
+        ],
+    )
+
+    with pytest.raises(ValueError) as error:
+        extract_zip_dataset(archive_path)
+
+    message = str(error.value)
+    assert "conflicting class labels" in message
+    assert "cats: dataset/cats/cat-copy.jpg" in message
+    assert "dogs: dataset/dogs/dog-copy.jpg" in message
+
+
+def test_empty_class_directory_is_reported_and_blocks_training(tmp_path):
+    archive_path = tmp_path / "empty_class.zip"
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("dataset/empty_class/", "")
+        for class_name, offset in (("cats", 0), ("dogs", 100)):
+            for index in range(3):
+                archive.writestr(
+                    f"dataset/{class_name}/{index}.jpg",
+                    _encoded_image_bytes(color=(offset + index * 20, 30, 40)),
+                )
+
+    extracted_root, summary = extract_zip_dataset(archive_path)
+    try:
+        report = image_api.analyze_extracted_dataset(
+            extracted_root,
+            summary,
+            archive_size_bytes=archive_path.stat().st_size,
+        )
+        assert summary["per_class_counts"]["empty_class"] == 0
+        assert summary["unique_per_class_counts"]["empty_class"] == 0
+        assert report["quality"]["validation"] == "failed"
+        assert any("empty_class" in finding for finding in report["quality"]["findings"])
+    finally:
+        shutil.rmtree(extracted_root, ignore_errors=True)
+
+
+def test_class_with_fewer_than_three_unique_images_fails_preflight_and_split(tmp_path):
+    archive_path = tmp_path / "insufficient_unique_images.zip"
+    _write_raw_image_entries(
+        archive_path,
+        [
+            ("dataset/cats/a.jpg", _encoded_image_bytes(color=(10, 20, 30))),
+            ("dataset/cats/a-copy.jpg", _encoded_image_bytes(color=(10, 20, 30))),
+            ("dataset/cats/b.jpg", _encoded_image_bytes(color=(40, 50, 60))),
+            *[
+                (
+                    f"dataset/dogs/{index}.jpg",
+                    _encoded_image_bytes(color=(100 + index * 30, 50, 60)),
+                )
+                for index in range(3)
+            ],
+        ],
+    )
+
+    extracted_root, summary = extract_zip_dataset(archive_path)
+    try:
+        report = image_api.analyze_extracted_dataset(
+            extracted_root,
+            summary,
+            archive_size_bytes=archive_path.stat().st_size,
+        )
+        assert report["quality"]["validation"] == "failed"
+        assert any("cats (2)" in finding for finding in report["quality"]["findings"])
+        with pytest.raises(ValueError, match="Class 'cats' needs at least 3 unique image contents"):
+            split_dataset(summary)
+    finally:
+        shutil.rmtree(extracted_root, ignore_errors=True)
 
 
 def test_zip_path_traversal_is_rejected(tmp_path):
@@ -197,7 +476,7 @@ def test_empty_class_folder_and_fewer_than_two_classes_are_rejected(tmp_path):
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("dataset/cat/.keep", "")
 
-    with pytest.raises(ValueError, match="at least 2|empty class|class"):
+    with pytest.raises(ValueError, match="No valid supported image files|at least 2|class"):
         validate_zip_dataset(archive_path)
 
     single_class_path = tmp_path / "single.zip"
@@ -209,11 +488,14 @@ def test_empty_class_folder_and_fewer_than_two_classes_are_rejected(tmp_path):
 def test_split_is_deterministic_and_non_overlapping(tmp_path):
     dataset_root = tmp_path / "images"
     dataset_root.mkdir()
-    for class_name, count in {"cat": 8, "dog": 8}.items():
+    for class_index, (class_name, count) in enumerate({"cat": 8, "dog": 8}.items()):
         class_dir = dataset_root / class_name
         class_dir.mkdir()
         for idx in range(count):
-            _write_image_file(class_dir / f"{idx}.jpg", color=(idx * 10 % 255, 20, 80))
+            _write_image_file(
+                class_dir / f"{idx}.jpg",
+                color=(class_index * 120 + idx * 12, 30 + idx * 15, 80 + class_index * 40),
+            )
 
     summary = {
         "class_names": ["cat", "dog"],
@@ -238,12 +520,15 @@ def test_split_is_deterministic_and_non_overlapping(tmp_path):
 def test_small_split_keeps_every_class_in_each_partition(tmp_path):
     dataset_root = tmp_path / "small_images"
     images_by_class = {}
-    for class_name in ("cat", "dog"):
+    for class_index, class_name in enumerate(("cat", "dog")):
         class_dir = dataset_root / class_name
         paths = []
         for index in range(3):
             image_path = class_dir / f"{index}.jpg"
-            _write_image_file(image_path)
+            _write_image_file(
+                image_path,
+                color=(class_index * 120 + index * 35, 40 + index * 45, 70 + class_index * 60),
+            )
             paths.append(str(image_path))
         images_by_class[class_name] = paths
     summary = {"class_names": ["cat", "dog"], "images_by_class": images_by_class}
@@ -261,23 +546,30 @@ def test_small_split_keeps_every_class_in_each_partition(tmp_path):
 
 def test_split_rejects_class_too_small_for_all_partitions(tmp_path):
     images_by_class = {"cat": [], "dog": []}
-    for class_name, count in (("cat", 2), ("dog", 3)):
+    for class_index, (class_name, count) in enumerate((("cat", 2), ("dog", 3))):
         for index in range(count):
             image_path = tmp_path / class_name / f"{index}.jpg"
-            _write_image_file(image_path)
+            _write_image_file(
+                image_path,
+                color=(class_index * 120 + index * 35, 40 + index * 45, 70 + class_index * 60),
+            )
             images_by_class[class_name].append(str(image_path))
 
-    with pytest.raises(ValueError, match="Class 'cat' needs at least 3 images"):
+    with pytest.raises(ValueError, match="Class 'cat' needs at least 3 unique image contents"):
         split_dataset({"class_names": ["cat", "dog"], "images_by_class": images_by_class})
 
 
 def test_nested_image_paths_keep_validator_assigned_class(tmp_path):
     archive_path = tmp_path / "nested_dataset.zip"
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for class_name in ("cat", "dog"):
+        for class_index, class_name in enumerate(("cat", "dog")):
             for index in range(3):
                 image_bytes = io.BytesIO()
-                Image.new("RGB", (16, 16), color=(index * 20, 30, 40)).save(image_bytes, format="JPEG")
+                Image.new(
+                    "RGB",
+                    (16, 16),
+                    color=(index * 20 + class_index * 100, 30 + class_index * 60, 40),
+                ).save(image_bytes, format="JPEG")
                 archive.writestr(
                     f"dataset/{class_name}/nested/subfolder/{index}.jpg",
                     image_bytes.getvalue(),
@@ -414,6 +706,22 @@ def test_image_api_preserves_pre_split_partitions_without_random_split(tmp_path,
         assert {observed["image_labels"][path] for path in paths} == {"cats", "dogs"}
 
 
+def test_image_api_rejects_cross_partition_duplicate_content(tmp_path):
+    archive_path = tmp_path / "pre_split_leakage.zip"
+    _write_presplit_duplicate_zip(archive_path, duplicate_across_splits=True)
+
+    with archive_path.open("rb") as dataset_file:
+        response = TestClient(app).post(
+            "/image/train",
+            files={"file": (archive_path.name, dataset_file, "application/zip")},
+            data={"pretrained": "false"},
+        )
+
+    assert response.status_code == 400
+    assert "Exact duplicate image content crosses the test, train partitions" in response.json()["detail"]
+    assert "held-out evaluation would be contaminated" in response.json()["detail"]
+
+
 def test_extraction_temp_directory_is_removed_when_validation_fails(tmp_path, monkeypatch):
     extracted_root = tmp_path / "validation_extract"
     extracted_root.mkdir()
@@ -436,7 +744,7 @@ def test_image_analysis_reports_balanced_unsplit_dataset_and_never_trains(
     tmp_path, monkeypatch
 ):
     archive_path = tmp_path / "balanced.zip"
-    _write_real_images_to_zip(archive_path, {"cats": 2, "dogs": 2})
+    _write_real_images_to_zip(archive_path, {"cats": 3, "dogs": 3})
     for function_name in (
         "train_image_classifier",
         "save_image_model_package",
@@ -452,17 +760,17 @@ def test_image_analysis_reports_balanced_unsplit_dataset_and_never_trains(
 
     assert response.status_code == 200, response.text
     payload = response.json()
-    assert payload["dataset"]["image_count"] == 4
+    assert payload["dataset"]["image_count"] == 6
     assert payload["dataset"]["class_count"] == 2
     assert payload["dataset"]["archive_size_bytes"] == archive_path.stat().st_size
     with zipfile.ZipFile(archive_path) as archive:
         expected_extracted_size = sum(member.file_size for member in archive.infolist() if not member.is_dir())
     assert payload["dataset"]["extracted_size_bytes"] == expected_extracted_size
     assert payload["classes"]["names"] == ["cats", "dogs"]
-    assert payload["classes"]["images_per_class"] == {"cats": 2, "dogs": 2}
+    assert payload["classes"]["images_per_class"] == {"cats": 3, "dogs": 3}
     assert payload["classes"]["distribution"] == {
-        "cats": {"count": 2, "percentage": 50.0},
-        "dogs": {"count": 2, "percentage": 50.0},
+        "cats": {"count": 3, "percentage": 50.0},
+        "dogs": {"count": 3, "percentage": 50.0},
     }
     assert payload["splits"] == {
         "source": "not_provided",
@@ -608,9 +916,13 @@ def test_image_analysis_reports_minimum_class_size_and_existing_split_rule(tmp_p
 
     assert response.status_code == 200, response.text
     metrics = response.json()["quality"]["metrics"]
-    assert metrics["class_size"] == {"minimum_images_per_class": 3}
+    assert metrics["class_size"] == {
+        "minimum_images_per_class": 3,
+        "minimum_unique_images_per_class": 3,
+    }
     assert metrics["split_feasibility"] == {
         "minimum_images_per_class": 3,
+        "minimum_unique_images_per_class": 3,
         "supports_existing_minimum_3_per_class_rule": True,
     }
 
@@ -814,14 +1126,16 @@ def test_image_analysis_rejects_non_zip_and_invalid_zip(tmp_path, filename, cont
     assert detail in response.json()["detail"]
 
 
-def test_image_analysis_rejects_corrupt_image_without_training(tmp_path, monkeypatch):
+def test_image_analysis_reports_corrupt_image_without_training(tmp_path, monkeypatch):
     archive_path = tmp_path / "corrupt.zip"
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         image_bytes = io.BytesIO()
         Image.new("RGB", (8, 8)).save(image_bytes, format="JPEG")
         archive.writestr("dataset/cats/valid.jpg", image_bytes.getvalue())
         archive.writestr("dataset/cats/corrupt.jpg", b"not a jpeg")
-        archive.writestr("dataset/dogs/valid.jpg", image_bytes.getvalue())
+        dog_image_bytes = io.BytesIO()
+        Image.new("RGB", (8, 8), color=(20, 80, 120)).save(dog_image_bytes, format="JPEG")
+        archive.writestr("dataset/dogs/valid.jpg", dog_image_bytes.getvalue())
     monkeypatch.setattr(
         image_api,
         "train_image_classifier",
@@ -830,23 +1144,32 @@ def test_image_analysis_rejects_corrupt_image_without_training(tmp_path, monkeyp
 
     response = _post_image_analysis(TestClient(app), archive_path)
 
-    assert response.status_code == 400
-    assert "corrupt or unreadable image" in response.json()["detail"]
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["dataset"]["valid_image_count"] == 2
+    assert payload["dataset"]["skipped_file_count"] == 1
+    assert payload["dataset"]["skipped_files"][0]["path"] == "dataset/cats/corrupt.jpg"
+    assert "corrupt or unreadable image" in payload["dataset"]["skipped_files"][0]["reason"]
 
 
-def test_image_analysis_rejects_unsupported_files(tmp_path):
+def test_image_analysis_reports_unsupported_files(tmp_path):
     archive_path = tmp_path / "unsupported.zip"
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         image_bytes = io.BytesIO()
         Image.new("RGB", (8, 8)).save(image_bytes, format="JPEG")
         archive.writestr("dataset/cats/cat.jpg", image_bytes.getvalue())
         archive.writestr("dataset/cats/notes.gif", b"unsupported")
-        archive.writestr("dataset/dogs/dog.jpg", image_bytes.getvalue())
+        dog_image_bytes = io.BytesIO()
+        Image.new("RGB", (8, 8), color=(20, 80, 120)).save(dog_image_bytes, format="JPEG")
+        archive.writestr("dataset/dogs/dog.jpg", dog_image_bytes.getvalue())
 
     response = _post_image_analysis(TestClient(app), archive_path)
 
-    assert response.status_code == 400
-    assert "unsupported file type" in response.json()["detail"]
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["dataset"]["skipped_file_count"] == 1
+    assert payload["dataset"]["skipped_files"][0]["path"] == "dataset/cats/notes.gif"
+    assert "unsupported file type" in payload["dataset"]["skipped_files"][0]["reason"]
 
 
 def test_image_analysis_rejects_unsafe_zip_paths(tmp_path):
@@ -919,11 +1242,7 @@ def test_image_analysis_cleans_upload_and_extraction_directories_after_validatio
     tmp_path, monkeypatch
 ):
     archive_path = tmp_path / "validation_failure.zip"
-    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        image_bytes = io.BytesIO()
-        Image.new("RGB", (8, 8)).save(image_bytes, format="JPEG")
-        archive.writestr("dataset/cats/corrupt.jpg", b"not a jpeg")
-        archive.writestr("dataset/dogs/valid.jpg", image_bytes.getvalue())
+    _write_real_images_to_zip(archive_path, {"cats": 3})
     temporary_directories = []
 
     def tracked_mkdtemp(prefix):
@@ -1018,11 +1337,14 @@ def test_pretrained_status_false_when_imagenet_loading_falls_back(monkeypatch):
 def test_training_function_works_with_tiny_test_model_dataset(tmp_path):
     dataset_root = tmp_path / "images"
     dataset_root.mkdir()
-    for class_name, count in {"cat": 4, "dog": 4}.items():
+    for class_index, (class_name, count) in enumerate({"cat": 4, "dog": 4}.items()):
         class_dir = dataset_root / class_name
         class_dir.mkdir()
         for idx in range(count):
-            _write_image_file(class_dir / f"{idx}.jpg", color=(idx * 15 % 255, 80, 100))
+            _write_image_file(
+                class_dir / f"{idx}.jpg",
+                color=(class_index * 120 + idx * 35, 80 + class_index * 50, 100 + idx * 25),
+            )
 
     class_to_index = {"cat": 0, "dog": 1}
     image_labels = {

@@ -666,15 +666,39 @@ export default function App() {
       return;
     }
 
+    const requestId = ++imageTrainingRequestRef.current;
     setImageTrainingState("loading");
     setImageTrainingError("");
     setImageTrainingResult(null);
     setImagePredictionState("idle");
     setImagePredictionError("");
     setImagePredictionResult(null);
-    const requestId = ++imageTrainingRequestRef.current;
 
     try {
+      if (!imageAnalysisResult) {
+        setImageAnalysisLoading(true);
+        setImageAnalysisError("");
+        const analysis = await analyzeImageDataset(imageZipFile);
+        if (requestId !== imageTrainingRequestRef.current) return;
+        setImageAnalysisResult(analysis);
+        if (analysis.quality?.validation !== "passed") {
+          setImageTrainingState("error");
+          setImageTrainingError(
+            "Dataset validation found issues. Review the preflight report before selecting another ZIP.",
+          );
+          return;
+        }
+        setImageTrainingState("idle");
+        return;
+      }
+      if (imageAnalysisResult.quality?.validation !== "passed") {
+        setImageTrainingState("error");
+        setImageTrainingError(
+          "Dataset validation did not pass. Correct the dataset before training.",
+        );
+        return;
+      }
+
       const payload = await trainImageModel(imageZipFile);
       if (requestId !== imageTrainingRequestRef.current) return;
       if (typeof payload.model_id !== "string" || !payload.model_id.trim()) {
@@ -688,6 +712,10 @@ export default function App() {
       if (requestId !== imageTrainingRequestRef.current) return;
       setImageTrainingState("error");
       setImageTrainingError(error.message || "Image training failed. Please try again.");
+    } finally {
+      if (requestId === imageTrainingRequestRef.current) {
+        setImageAnalysisLoading(false);
+      }
     }
   }
 
@@ -3117,10 +3145,21 @@ export default function App() {
                       <button
                         type="button"
                         onClick={startImageTraining}
-                        disabled={imageTrainingState === "loading" || imageRoutedText !== task.trim()}
+                        disabled={
+                          imageTrainingState === "loading" ||
+                          imageRoutedText !== task.trim() ||
+                          (imageAnalysisResult &&
+                            imageAnalysisResult.quality?.validation !== "passed")
+                        }
                         style={{ display: "block", marginTop: "12px", padding: "11px 18px", border: 0, borderRadius: "6px", background: imageTrainingState === "loading" ? "#7f9a89" : "#1e6041", color: "#ffffff", cursor: imageTrainingState === "loading" ? "wait" : "pointer", font: "600 14px Arial, sans-serif" }}
                       >
-                        {imageTrainingState === "loading" ? "Training image classifier..." : "Train Image Model"}
+                        {imageTrainingState === "loading"
+                          ? imageAnalysisLoading
+                            ? "Validating image dataset..."
+                            : "Training image classifier..."
+                          : imageAnalysisResult?.quality?.validation === "passed"
+                            ? "Train Image Model"
+                            : "Validate Dataset Before Training"}
                       </button>
                     </div>
                   )}
@@ -3132,6 +3171,62 @@ export default function App() {
                 )}
               </section>
             )}
+
+            {imageRoutingState === "success" &&
+              imageRoutingResult?.intent === "IMAGE_TRAINING_REQUEST" &&
+              imageAnalysisResult && (
+                <section
+                  aria-label="Image Dataset Preflight"
+                  style={{ marginTop: "16px", padding: "16px", border: "1px solid #dbe5de", borderRadius: "6px", background: "#ffffff", font: "14px/1.5 Arial, sans-serif" }}
+                >
+                  <h3 style={{ margin: "0 0 10px", fontSize: "17px" }}>Dataset preflight</h3>
+                  <p style={{ margin: 0 }}>
+                    Validation: <strong>{imageAnalysisResult.quality?.validation || "Not available"}</strong>
+                    {" · "}Files: {displayAnalysisNumber(imageAnalysisResult.dataset?.total_file_count, 0)}
+                    {" · "}Valid images: {displayAnalysisNumber(imageAnalysisResult.dataset?.valid_image_count, 0)}
+                    {" · "}Skipped: {displayAnalysisNumber(imageAnalysisResult.dataset?.skipped_file_count, 0)}
+                    {" · "}Duplicate groups: {displayAnalysisNumber(imageQualityMetrics.duplicates?.duplicate_group_count, 0)}
+                  </p>
+                  {Object.entries(imageAnalysisResult.dataset?.excluded_image_counts || {}).some(([, count]) => count > 0) && (
+                    <p style={{ margin: "6px 0 0" }}>
+                      Excluded from training: {Object.entries(imageAnalysisResult.dataset.excluded_image_counts)
+                        .filter(([, count]) => count > 0)
+                        .map(([folder, count]) => `${folder}: ${displayAnalysisNumber(count, 0)}`)
+                        .join(", ")}
+                    </p>
+                  )}
+                  {imageAnalysisClasses.length > 0 && (
+                    <ul style={{ margin: "8px 0 0", paddingLeft: "20px" }}>
+                      {imageAnalysisClasses.map((className) => (
+                        <li key={className}>
+                          {className}: {displayAnalysisNumber(imageAnalysisResult.classes?.images_per_class?.[className], 0)} valid,{" "}
+                          {displayAnalysisNumber(imageAnalysisResult.classes?.unique_images_per_class?.[className], 0)} unique
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {imageAnalysisFindings && imageAnalysisFindings.length > 0 && (
+                    <ul style={{ margin: "8px 0 0", paddingLeft: "20px" }}>
+                      {imageAnalysisFindings.map((finding, index) => <li key={index}>{finding}</li>)}
+                    </ul>
+                  )}
+                  {Array.isArray(imageAnalysisResult.dataset?.skipped_files) &&
+                    imageAnalysisResult.dataset.skipped_files.length > 0 && (
+                      <ul style={{ margin: "8px 0 0", paddingLeft: "20px" }}>
+                        {imageAnalysisResult.dataset.skipped_files.map((entry) => (
+                          <li key={`${entry.path}:${entry.reason}`}>
+                            {entry.path}: {entry.reason}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  <p style={{ margin: "8px 0 0" }}>
+                    {imageAnalysisResult.quality?.validation === "passed"
+                      ? "Review complete. Select Train Image Model to begin training."
+                      : "Training is blocked until the dataset validation issues are corrected."}
+                  </p>
+                </section>
+              )}
 
             {imageRoutingState === "success" && imageRoutingResult?.intent === "IMAGE_DATASET_ANALYSIS" && (
               <section

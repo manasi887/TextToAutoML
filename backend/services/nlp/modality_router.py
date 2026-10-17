@@ -61,8 +61,26 @@ _TRAINING_OBJECTIVE = re.compile(
 _PREDICTION_ACTION = re.compile(
     r"\b(?:classify|predict|recognize|identify)\b", re.IGNORECASE
 )
+_CONFIDENCE_QUERY = re.compile(
+    r"\b(?:how\s+)?(?:confident|confidence|probabilit(?:y|ies))\b",
+    re.IGNORECASE,
+)
 _IMAGE_LEVEL_CLASSIFICATION = re.compile(
     r"\bclassify\s+(?:this|that|the|selected|uploaded|single)\s+(?:image|photo|picture)\b",
+    re.IGNORECASE,
+)
+_UNSUPPORTED_OBJECT_ANALYSIS = re.compile(
+    r"\bobject\s+detection\b|\b(?:detect|count|locate|localize|segment)\s+"
+    r"(?:all\s+)?objects?\b|\bidentify\s+(?:all\s+)?objects?\b",
+    re.IGNORECASE,
+)
+_TOP_K_REQUEST = re.compile(
+    r"\btop[-\s]?(?:k|[2-9]|\d{2,}|two|three|four|five|six|seven|eight|nine)\b",
+    re.IGNORECASE,
+)
+_STANDALONE_RECOMMENDATION = re.compile(
+    r"\b(?:recommend|suggest)\b[^.!?;]{0,100}\b(?:models?|algorithms?|datasets?)\b|"
+    r"\b(?:model|algorithm|dataset)\s+recommendation\b",
     re.IGNORECASE,
 )
 _NEGATED_TRAINING = re.compile(
@@ -122,6 +140,41 @@ def _unknown(reason: str) -> NlpRoutingDecision:
     )
 
 
+def _image_prediction_decision(
+    request: NlpRoutingRequest,
+    *,
+    image_available: bool,
+) -> NlpRoutingDecision:
+    required_context: list[str] = []
+    if not image_available:
+        required_context.append("image")
+
+    model_id = request.image_model_id
+    if not model_id:
+        required_context.append("image_model_id")
+    elif not re.fullmatch(r"[A-Za-z0-9_]+", model_id):
+        required_context.append("valid_image_model_id")
+
+    if not required_context:
+        reason = "Ready to route to image prediction."
+    elif "valid_image_model_id" in required_context:
+        reason = "Image model IDs may contain only letters, numbers, and underscores."
+    elif len(required_context) == 2:
+        reason = "A single image and a trained image model are required for image prediction."
+    elif "image" in required_context:
+        reason = "A single image is required for image prediction."
+    else:
+        reason = "A trained image model is required for image prediction."
+
+    return _decision(
+        "image",
+        "IMAGE_PREDICTION",
+        ready=not required_context,
+        reason=reason,
+        required_context=required_context,
+    )
+
+
 def route_nlp_request(request: NlpRoutingRequest) -> NlpRoutingDecision:
     text = request.text
     explicit_image = bool(_IMAGE_REFERENCE.search(text))
@@ -149,6 +202,13 @@ def route_nlp_request(request: NlpRoutingRequest) -> NlpRoutingDecision:
         return _unknown(
             "The request sounds tabular, but the active asset is an image. Clarify which asset to use."
         )
+    if (
+        _STANDALONE_RECOMMENDATION.search(text)
+        and not _TRAIN_ACTION.search(text)
+    ):
+        return _unknown(
+            "Standalone dataset and model recommendations are not routed as NLP actions."
+        )
     if tabular_asset:
         return _decision(
             "tabular",
@@ -164,7 +224,17 @@ def route_nlp_request(request: NlpRoutingRequest) -> NlpRoutingDecision:
     )
     image_available = request.image_available or image_asset
     image_request = explicit_image or has_image_context
-    prediction_requested = bool(_PREDICTION_ACTION.search(text))
+    if image_request and _UNSUPPORTED_OBJECT_ANALYSIS.search(text):
+        return _unknown(
+            "Object-level image analysis is not supported; image prediction returns one class for the whole image."
+        )
+    if image_request and _TOP_K_REQUEST.search(text):
+        return _unknown(
+            "Top-K predictions are not supported as a separate action; image prediction returns probabilities for all classes."
+        )
+    prediction_requested = bool(
+        _PREDICTION_ACTION.search(text) or _CONFIDENCE_QUERY.search(text)
+    )
     training_negated = bool(_NEGATED_TRAINING.search(text))
     affirmative_training = (
         bool(_TRAIN_ACTION.search(text)) and not training_negated
@@ -185,29 +255,9 @@ def route_nlp_request(request: NlpRoutingRequest) -> NlpRoutingDecision:
         )
 
     if image_request and prediction_override:
-        required_context: list[str] = []
-        if not image_available:
-            required_context.append("image")
-        if not request.image_model_id:
-            required_context.append("image_model_id")
-        return _decision(
-            "image",
-            "IMAGE_PREDICTION",
-            ready=not required_context,
-            reason=(
-                "Ready to route to image prediction."
-                if not required_context
-                else (
-                    "A single image and a trained image model are required for image prediction."
-                    if len(required_context) == 2
-                    else (
-                        "A single image is required for image prediction."
-                        if "image" in required_context
-                        else "A trained image model is required for image prediction."
-                    )
-                )
-            ),
-            required_context=required_context,
+        return _image_prediction_decision(
+            request,
+            image_available=image_available,
         )
 
     if (
@@ -276,29 +326,24 @@ def route_nlp_request(request: NlpRoutingRequest) -> NlpRoutingDecision:
         )
     )
     if dataset_analysis:
+        required_context = [] if image_dataset_available else ["image_dataset"]
+        ready = not required_context
         return _decision(
             "image",
             "IMAGE_DATASET_ANALYSIS",
-            ready=False,
-            reason="Standalone image dataset analysis is not implemented yet.",
+            ready=ready,
+            reason=(
+                "Ready to analyze the image dataset."
+                if ready
+                else "An image dataset is required for image analysis."
+            ),
+            required_context=required_context,
         )
 
     if image_request and prediction_requested:
-        required_context: list[str] = []
-        if not image_available:
-            required_context.append("image")
-        if not request.image_model_id:
-            required_context.append("image_model_id")
-        return _decision(
-            "image",
-            "IMAGE_PREDICTION",
-            ready=not required_context,
-            reason=(
-                "Ready to route to image prediction."
-                if not required_context
-                else "A single image and a trained image model are required for image prediction."
-            ),
-            required_context=required_context,
+        return _image_prediction_decision(
+            request,
+            image_available=image_available,
         )
 
     if tabular_asset or explicit_tabular or _TABULAR_ACTION.search(text):

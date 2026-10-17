@@ -39,9 +39,39 @@ def _detect_wrapper_and_strip(paths: list[tuple[str, ...]]) -> list[tuple[str, .
     if not paths:
         return []
     first_segments = {parts[0] for parts in paths if parts}
+    if first_segments <= set(DATASET_SPLITS):
+        return paths
     if len(first_segments) == 1 and all(len(parts) >= 2 for parts in paths):
         return [parts[1:] for parts in paths]
     return paths
+
+
+def _is_segmentation_dataset_layout(
+    image_paths: list[tuple[str, ...]],
+    directory_paths: list[tuple[str, ...]],
+) -> bool:
+    train_tree_present = any(
+        parts[:2] == ("seg_train", "seg_train") and len(parts) >= 4
+        for parts in image_paths
+    ) or any(
+        parts[:2] == ("seg_train", "seg_train") and len(parts) >= 3
+        for parts in directory_paths
+    )
+    test_tree_present = any(
+        parts[:2] == ("seg_test", "seg_test") and len(parts) >= 3
+        for parts in image_paths
+    ) or any(
+        parts[:2] == ("seg_test", "seg_test") and len(parts) >= 2
+        for parts in directory_paths
+    )
+    prediction_tree_present = any(
+        parts[:2] == ("seg_pred", "seg_pred") and len(parts) >= 3
+        for parts in image_paths
+    ) or any(
+        parts[:2] == ("seg_pred", "seg_pred") and len(parts) >= 2
+        for parts in directory_paths
+    )
+    return train_tree_present and test_tree_present and prediction_tree_present
 
 
 def _extract_zip_to_tempdir(zip_path: str | Path) -> Path:
@@ -55,10 +85,13 @@ def _extract_zip_to_tempdir(zip_path: str | Path) -> Path:
     try:
         with zipfile.ZipFile(source_zip, "r") as archive:
             for member in archive.infolist():
-                if member.is_dir():
-                    continue
                 safe_name = _safe_member_name(member.filename)
                 target_path = temp_root / safe_name
+                if member.is_dir():
+                    target_path.mkdir(parents=True, exist_ok=True)
+                    if not target_path.resolve().is_relative_to(temp_root.resolve()):
+                        raise ValueError(f"unsafe extraction path detected: {member.filename!r}")
+                    continue
                 target_path.parent.mkdir(parents=True, exist_ok=True)
                 if not target_path.parent.is_relative_to(temp_root):
                     raise ValueError(f"unsafe extraction path detected: {member.filename!r}")
@@ -70,30 +103,34 @@ def _extract_zip_to_tempdir(zip_path: str | Path) -> Path:
     return temp_root
 
 
-def _collect_image_entries(extracted_root: Path) -> list[tuple[str, ...]]:
+def _collect_image_entries(
+    extracted_root: Path,
+) -> tuple[list[tuple[str, ...]], list[tuple[str, ...]], list[dict[str, str]], int]:
     gathered: list[tuple[str, ...]] = []
-    class_dirs: set[str] = set()
+    directories: list[tuple[str, ...]] = []
+    skipped_files: list[dict[str, str]] = []
+    total_files = 0
     for path in sorted(extracted_root.rglob("*")):
         if path.is_dir():
+            directories.append(tuple(path.relative_to(extracted_root).parts))
             continue
+        total_files += 1
         suffix = path.suffix.lower()
         rel = path.relative_to(extracted_root)
         parts = rel.parts
-        if len(parts) >= 2:
-            class_dirs.add(parts[0] if len(parts) > 1 else "")
         if suffix not in ALLOWED_IMAGE_EXTENSIONS:
-            if path.name.lower().startswith(".") or path.name.lower() in {"readme.md", "readme.txt", "thumbs.db", "desktop.ini"}:
-                continue
-            if len(parts) >= 2:
-                raise ValueError(f"unsupported file type encountered in dataset: {path.name}")
+            skipped_files.append({
+                "path": rel.as_posix(),
+                "reason": f"unsupported file type '{suffix or 'no extension'}'",
+            })
+            continue
+        try:
+            _validate_image_file(path)
+        except ValueError as exc:
+            skipped_files.append({"path": rel.as_posix(), "reason": str(exc)})
             continue
         gathered.append(tuple(rel.parts))
-    if not gathered:
-        if class_dirs:
-            first_class = sorted(class_dirs)[0]
-            raise ValueError(f"class directory is empty: {first_class}")
-        raise ValueError("no valid image files were found in the uploaded ZIP dataset.")
-    return gathered
+    return gathered, directories, skipped_files, total_files
 
 
 def _validate_image_file(path: Path) -> tuple[int, int, int]:
@@ -110,22 +147,103 @@ def _validate_image_file(path: Path) -> tuple[int, int, int]:
 
 
 def _validate_extracted_dataset(extracted_root: Path) -> dict[str, Any]:
-    image_rel_paths = _collect_image_entries(extracted_root)
-    normalized_image_paths = _detect_wrapper_and_strip(image_rel_paths)
-    first_segments = {parts[0] for parts in normalized_image_paths if parts}
+    image_rel_paths, directory_paths, skipped_files, total_files = _collect_image_entries(extracted_root)
+    if not image_rel_paths:
+        if skipped_files:
+            skipped_details = "; ".join(
+                f"{entry['path']}: {entry['reason']}" for entry in skipped_files[:10]
+            )
+            if len(skipped_files) > 10:
+                skipped_details += f"; and {len(skipped_files) - 10} more skipped files"
+            raise ValueError(
+                f"No valid supported image files were found ({total_files} files inspected). "
+                f"Skipped files: {skipped_details}."
+            )
+        raise ValueError("no valid image files were found in the uploaded ZIP dataset.")
+
+    valid_image_count = len(image_rel_paths)
     split_directories = set(DATASET_SPLITS)
-    is_pre_split = bool(first_segments & split_directories)
-    if is_pre_split and first_segments != split_directories:
-        missing_splits = sorted(split_directories - first_segments)
-        raise ValueError(
-            "Pre-split image dataset must contain train, validation, and test directories; "
-            f"missing: {', '.join(missing_splits)}."
-        )
+    excluded_image_counts: dict[str, int] = {}
+    if _is_segmentation_dataset_layout(image_rel_paths, directory_paths):
+        training_paths = [
+            parts for parts in image_rel_paths
+            if parts[:2] == ("seg_train", "seg_train") and len(parts) >= 4
+        ]
+        malformed_training_paths = [
+            parts for parts in image_rel_paths
+            if parts[0] == "seg_train"
+            and not (parts[:2] == ("seg_train", "seg_train") and len(parts) >= 4)
+        ]
+        if malformed_training_paths:
+            raise ValueError(
+                "Images in the seg_train folder must be under "
+                "seg_train/seg_train/<class>/."
+            )
+        unexpected_paths = [
+            parts for parts in image_rel_paths
+            if parts[0] not in {"seg_train", "seg_test", "seg_pred"}
+        ]
+        if unexpected_paths:
+            raise ValueError(
+                "The recognized segmentation dataset layout contains supported images "
+                "outside seg_train, seg_test, and seg_pred folders."
+            )
+
+        excluded_image_counts = {
+            folder: sum(parts[0] == folder for parts in image_rel_paths)
+            for folder in ("seg_test", "seg_pred")
+        }
+        image_rel_paths = training_paths
+        normalized_image_paths = [parts[2:] for parts in training_paths]
+        normalized_directory_paths = [
+            parts[2:]
+            for parts in directory_paths
+            if len(parts) >= 3 and parts[:2] == ("seg_train", "seg_train")
+        ]
+        is_pre_split = False
+        common_wrapper = None
+    else:
+        normalized_image_paths = _detect_wrapper_and_strip(image_rel_paths)
+        first_segments = {parts[0] for parts in normalized_image_paths if parts}
+        is_pre_split = bool(first_segments & split_directories)
+        if is_pre_split and first_segments != split_directories:
+            missing_splits = sorted(split_directories - first_segments)
+            raise ValueError(
+                "Pre-split image dataset must contain train, validation, and test directories; "
+                f"missing: {', '.join(missing_splits)}."
+            )
+        original_first_segments = {parts[0] for parts in image_rel_paths if parts}
+        common_wrapper = None
+        if (
+            len(original_first_segments) == 1
+            and next(iter(original_first_segments)) not in split_directories
+            and all(len(parts) >= 2 for parts in image_rel_paths)
+        ):
+            common_wrapper = next(iter(original_first_segments))
+        normalized_directory_paths = [
+            parts[1:]
+            if common_wrapper and parts[0] == common_wrapper
+            else parts
+            for parts in directory_paths
+        ]
 
     class_to_files: dict[str, list[str]] = {}
+    source_images_by_class: dict[str, list[str]] = {}
     image_labels: dict[str, str] = {}
     predefined_split = {split_name: [] for split_name in DATASET_SPLITS}
     split_classes = {split_name: set() for split_name in DATASET_SPLITS}
+
+    for normalized_parts in normalized_directory_paths:
+        if not normalized_parts:
+            continue
+        if is_pre_split and normalized_parts[0] in split_directories:
+            if len(normalized_parts) >= 2:
+                split_classes[normalized_parts[0]].add(normalized_parts[1])
+                class_to_files.setdefault(normalized_parts[1], [])
+                source_images_by_class.setdefault(normalized_parts[1], [])
+        elif not is_pre_split:
+            class_to_files.setdefault(normalized_parts[0], [])
+            source_images_by_class.setdefault(normalized_parts[0], [])
 
     for rel_parts, normalized_parts in zip(image_rel_paths, normalized_image_paths):
         minimum_parts = 3 if is_pre_split else 2
@@ -140,6 +258,7 @@ def _validate_extracted_dataset(extracted_root: Path) -> dict[str, Any]:
             class_name = normalized_parts[0]
         resolved_path = str(actual_path.resolve())
         class_to_files.setdefault(class_name, []).append(resolved_path)
+        source_images_by_class.setdefault(class_name, []).append(resolved_path)
         image_labels[resolved_path] = class_name
 
     if len(class_to_files) < 2:
@@ -153,26 +272,92 @@ def _validate_extracted_dataset(extracted_root: Path) -> dict[str, Any]:
             "in train, validation, and test."
         )
 
-    for class_name, file_paths in class_to_files.items():
-        if not file_paths:
-            raise ValueError(f"class directory is empty: {class_name}")
+    content_groups: dict[str, list[tuple[str, str]]] = {}
+    for class_name, file_paths in source_images_by_class.items():
         for file_path in file_paths:
-            path = Path(file_path)
-            _validate_image_file(path)
+            content_groups.setdefault(_sha256_file(file_path), []).append((class_name, file_path))
+
+    duplicate_groups: list[dict[str, Any]] = []
+    for digest, entries in content_groups.items():
+        labels = sorted({class_name for class_name, _ in entries})
+        if len(labels) > 1:
+            conflicting_files = ", ".join(
+                f"{class_name}: {Path(file_path).relative_to(extracted_root).as_posix()}"
+                for class_name, file_path in entries
+            )
+            raise ValueError(
+                "Byte-identical image content has conflicting class labels "
+                f"({conflicting_files}); correct the labels before training."
+            )
+        if len(entries) > 1:
+            duplicate_groups.append({
+                "hash": digest,
+                "class_name": labels[0],
+                "files": [
+                    Path(file_path).relative_to(extracted_root).as_posix()
+                    for _, file_path in entries
+                ],
+            })
+
+    if is_pre_split:
+        for split_name, paths in predefined_split.items():
+            seen_digests: set[str] = set()
+            deduplicated_paths: list[str] = []
+            for file_path in paths:
+                digest = _sha256_file(file_path)
+                if digest not in seen_digests:
+                    seen_digests.add(digest)
+                    deduplicated_paths.append(file_path)
+            predefined_split[split_name] = deduplicated_paths
+    else:
+        for class_name, file_paths in source_images_by_class.items():
+            seen_digests: set[str] = set()
+            class_to_files[class_name] = []
+            for file_path in file_paths:
+                digest = _sha256_file(file_path)
+                if digest not in seen_digests:
+                    seen_digests.add(digest)
+                    class_to_files[class_name].append(file_path)
 
     class_names = sorted(class_to_files)
     class_to_index = {name: index for index, name in enumerate(class_names)}
     per_class_counts = {name: len(class_to_files[name]) for name in class_names}
-    image_count = sum(per_class_counts.values())
-    image_extensions = sorted({Path(file_path).suffix.lower() for files in class_to_files.values() for file_path in files})
+    source_per_class_counts = {
+        name: len(source_images_by_class.get(name, [])) for name in class_names
+    }
+    unique_per_class_counts = {
+        name: len({
+            _sha256_file(path)
+            for path in source_images_by_class.get(name, [])
+        })
+        for name in class_names
+    }
+    image_count = sum(source_per_class_counts.values())
+    image_extensions = sorted({
+        Path(file_path).suffix.lower()
+        for files in source_images_by_class.values()
+        for file_path in files
+    })
 
     summary: dict[str, Any] = {
         "class_names": class_names,
         "class_to_index": class_to_index,
         "image_count": image_count,
-        "per_class_counts": per_class_counts,
+        "valid_image_count": valid_image_count,
+        "excluded_image_counts": excluded_image_counts,
+        "total_file_count": total_files,
+        "skipped_file_count": len(skipped_files),
+        "skipped_files": skipped_files,
+        "per_class_counts": source_per_class_counts,
+        "unique_per_class_counts": unique_per_class_counts,
+        "duplicate_groups": duplicate_groups,
+        "duplicate_group_count": len(duplicate_groups),
+        "duplicate_file_count": sum(len(group["files"]) for group in duplicate_groups),
         "image_extensions": image_extensions,
         "images_by_class": {name: sorted(class_to_files[name]) for name in class_names},
+        "source_images_by_class": {
+            name: sorted(source_images_by_class.get(name, [])) for name in class_names
+        },
         "image_labels": image_labels,
         "predefined_split": (
             {name: sorted(paths) for name, paths in predefined_split.items()}
@@ -188,6 +373,58 @@ def validate_zip_dataset(zip_path: str | Path) -> dict[str, Any]:
     """Validate a ZIP image dataset and return a deterministic summary."""
     extracted_root = _extract_zip_to_tempdir(zip_path)
     return _validate_extracted_dataset(extracted_root)
+
+
+def _sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with Path(path).open("rb") as image_file:
+            for chunk in iter(lambda: image_file.read(_HASH_CHUNK_SIZE), b""):
+                digest.update(chunk)
+    except OSError as error:
+        raise ValueError(
+            f"Could not hash image '{Path(path).name}' for duplicate-leakage validation."
+        ) from error
+    return digest.hexdigest()
+
+
+def validate_split_for_leakage(
+    split: dict[str, list[str]],
+    image_labels: dict[str, str],
+) -> None:
+    """Reject byte-identical image content that crosses partitions or class labels."""
+    content_partitions: dict[str, set[str]] = {}
+    content_labels: dict[str, set[str]] = {}
+    content_paths: dict[str, str] = {}
+
+    for split_name in DATASET_SPLITS:
+        for image_path in split.get(split_name, []):
+            label = image_labels.get(image_path)
+            if label is None:
+                raise ValueError(
+                    f"Image '{Path(image_path).name}' has no class label for "
+                    "duplicate-leakage validation."
+                )
+            digest = _sha256_file(image_path)
+            content_partitions.setdefault(digest, set()).add(split_name)
+            content_labels.setdefault(digest, set()).add(label)
+            content_paths.setdefault(digest, Path(image_path).name)
+
+    for digest, labels in content_labels.items():
+        if len(labels) > 1:
+            raise ValueError(
+                "Byte-identical image content has conflicting class labels "
+                f"('{content_paths[digest]}'); correct the labels before training."
+            )
+
+    for digest, partitions in content_partitions.items():
+        if len(partitions) > 1:
+            names = ", ".join(sorted(partitions))
+            raise ValueError(
+                "Exact duplicate image content crosses the "
+                f"{names} partitions; held-out evaluation would be contaminated. "
+                "Remove the duplicates or place all copies in one partition."
+            )
 
 
 def split_dataset(summary: dict[str, Any], *, seed: int = 42, train_ratio: float = 0.70, validation_ratio: float = 0.15, test_ratio: float = 0.15) -> dict[str, list[str]]:
@@ -208,16 +445,31 @@ def split_dataset(summary: dict[str, Any], *, seed: int = 42, train_ratio: float
     validation_files: list[str] = []
     test_files: list[str] = []
     rng = np.random.default_rng(seed)
+    content_labels: dict[str, str] = {}
+    unique_image_count = 0
 
     for class_name in class_names:
         file_paths = list(images_by_class.get(class_name, []))
-        total = len(file_paths)
+        groups_by_digest: dict[str, list[str]] = {}
+        for file_path in file_paths:
+            digest = _sha256_file(file_path)
+            prior_label = content_labels.setdefault(digest, class_name)
+            if prior_label != class_name:
+                raise ValueError(
+                    "Byte-identical image content has conflicting class labels "
+                    f"('{Path(file_path).name}'); correct the labels before training."
+                )
+            groups_by_digest.setdefault(digest, []).append(file_path)
+
+        content_groups = [[paths[0]] for paths in groups_by_digest.values()]
+        total = len(content_groups)
         if total < 3:
             raise ValueError(
-                f"Class '{class_name}' needs at least 3 images to include it in "
-                "training, validation, and test splits."
+                f"Class '{class_name}' needs at least 3 unique image contents "
+                "to include it in training, validation, and test splits."
             )
-        rng.shuffle(file_paths)
+        unique_image_count += total
+        rng.shuffle(content_groups)
 
         ideal_counts = total * ratios
         counts = np.floor(ideal_counts).astype(int)
@@ -238,13 +490,16 @@ def split_dataset(summary: dict[str, Any], *, seed: int = 42, train_ratio: float
 
         train_count, validation_count, test_count = (int(count) for count in counts)
 
-        train_files.extend(file_paths[:train_count])
-        validation_files.extend(file_paths[train_count:train_count + validation_count])
-        test_files.extend(file_paths[train_count + validation_count:train_count + validation_count + test_count])
+        for group in content_groups[:train_count]:
+            train_files.extend(group)
+        for group in content_groups[train_count:train_count + validation_count]:
+            validation_files.extend(group)
+        for group in content_groups[train_count + validation_count:train_count + validation_count + test_count]:
+            test_files.extend(group)
 
     combined = set(train_files) | set(validation_files) | set(test_files)
-    if len(combined) != sum(len(images_by_class[class_name]) for class_name in class_names):
-        raise ValueError("Split did not preserve all images exactly once.")
+    if len(combined) != unique_image_count:
+        raise ValueError("Split did not preserve every unique image content exactly once.")
 
     return {
         "train": sorted(train_files),
@@ -491,7 +746,9 @@ def analyze_extracted_dataset(
             )
 
         for class_name in class_names:
-            for image_path in summary["images_by_class"][class_name]:
+            for image_path in summary.get(
+                "source_images_by_class", summary["images_by_class"]
+            )[class_name]:
                 path = Path(image_path)
                 try:
                     with Image.open(path) as image:
@@ -534,18 +791,6 @@ def analyze_extracted_dataset(
                 aspect_ratio_total += aspect_ratio
                 metadata_count += 1
 
-                digest = hashlib.sha256()
-                try:
-                    with path.open("rb") as image_file:
-                        for chunk in iter(
-                            lambda: image_file.read(_HASH_CHUNK_SIZE), b""
-                        ):
-                            digest.update(chunk)
-                except OSError as error:
-                    raise ValueError(
-                        f"Could not hash validated image '{path.name}'."
-                    ) from error
-
                 relative_path = path.relative_to(extracted_path).as_posix()
                 split_row = connection.execute(
                     "SELECT split_name FROM provided_splits WHERE path = ?",
@@ -558,7 +803,7 @@ def analyze_extracted_dataset(
                     ) VALUES (?, ?, ?, ?, ?)
                     """,
                     (
-                        digest.hexdigest(),
+                        _sha256_file(path),
                         relative_path,
                         class_name,
                         width * height,
@@ -615,17 +860,66 @@ def analyze_extracted_dataset(
     minimum_images_per_class = min(per_class_counts.values())
     largest_class_count = max(per_class_counts.values())
     smallest_class_count = min(per_class_counts.values())
+    unique_per_class_counts = dict(summary["unique_per_class_counts"])
     findings = []
+    validation_blockers = []
     if dimension_count > 1:
         findings.append("Images have inconsistent dimensions.")
     if duplicate_metrics["duplicate_group_count"] > 0:
         findings.append("Exact duplicate image files were detected.")
+    if summary["skipped_files"]:
+        findings.append(
+            f"{len(summary['skipped_files'])} unsupported or unreadable file(s) were skipped."
+        )
+    empty_classes = [
+        name for name, count in per_class_counts.items() if count == 0
+    ]
+    if empty_classes:
+        validation_blockers.append(
+            f"Empty classes have no readable supported images: {', '.join(empty_classes)}."
+        )
+    if predefined_split is None:
+        insufficient_classes = [
+            name for name, count in unique_per_class_counts.items() if count < 3
+        ]
+        if insufficient_classes:
+            validation_blockers.append(
+                "Each class needs at least 3 unique image contents for train, "
+                "validation, and test splits: "
+                + ", ".join(
+                    f"{name} ({unique_per_class_counts[name]})"
+                    for name in insufficient_classes
+                )
+                + "."
+            )
+    elif per_class_split_counts is not None:
+        insufficient_splits = [
+            f"{class_name} ({split_name})"
+            for class_name, counts in per_class_split_counts.items()
+            for split_name, count in counts.items()
+            if count == 0
+        ]
+        if insufficient_splits:
+            validation_blockers.append(
+                "Every class must have at least one image in each provided split: "
+                + ", ".join(insufficient_splits)
+                + "."
+            )
     if cross_split_metrics.get("match_count", 0) > 0:
         findings.append("Possible exact-duplicate split leakage was detected.")
+        validation_blockers.append(
+            "Byte-identical images cross provided train/validation/test partitions."
+        )
+    findings.extend(validation_blockers)
 
     return {
         "dataset": {
             "image_count": image_count,
+            "total_file_count": int(summary["total_file_count"]),
+            "valid_image_count": int(summary["valid_image_count"]),
+            "excluded_image_counts": dict(summary.get("excluded_image_counts", {})),
+            "skipped_file_count": int(summary["skipped_file_count"]),
+            "skipped_files": summary["skipped_files"],
             "class_count": len(class_names),
             "archive_size_bytes": int(archive_size_bytes),
             "extracted_size_bytes": int(extracted_size_bytes),
@@ -633,6 +927,7 @@ def analyze_extracted_dataset(
         "classes": {
             "names": class_names,
             "images_per_class": per_class_counts,
+            "unique_images_per_class": unique_per_class_counts,
             "distribution": distribution,
         },
         "splits": {
@@ -663,7 +958,7 @@ def analyze_extracted_dataset(
             "channel_note": "Source image bands; training converts images to RGB.",
         },
         "quality": {
-            "validation": "passed",
+            "validation": "failed" if validation_blockers else "passed",
             "findings": findings,
             "metrics": {
                 "dimension_consistency": {
@@ -679,17 +974,29 @@ def analyze_extracted_dataset(
                 },
                 "class_size": {
                     "minimum_images_per_class": minimum_images_per_class,
+                    "minimum_unique_images_per_class": min(
+                        unique_per_class_counts.values()
+                    ),
                 },
                 "split_feasibility": {
                     "minimum_images_per_class": minimum_images_per_class,
+                    "minimum_unique_images_per_class": min(
+                        unique_per_class_counts.values()
+                    ),
                     "supports_existing_minimum_3_per_class_rule": (
-                        minimum_images_per_class >= 3
+                        all(count >= 3 for count in unique_per_class_counts.values())
+                        if predefined_split is None
+                        else not validation_blockers
                     ),
                 },
                 "class_balance": {
                     "largest_class_count": largest_class_count,
                     "smallest_class_count": smallest_class_count,
-                    "imbalance_ratio": largest_class_count / smallest_class_count,
+                    "imbalance_ratio": (
+                        largest_class_count / smallest_class_count
+                        if smallest_class_count
+                        else None
+                    ),
                 },
                 "duplicates": duplicate_metrics,
                 "cross_split_duplicates": cross_split_metrics,

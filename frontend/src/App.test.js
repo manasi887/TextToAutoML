@@ -486,9 +486,16 @@ test("training begins only from a fresh ready training decision and explicit but
   assert.match(trainingHandler, /explicitTrainingReady/);
   assert.match(trainingHandler, /bothImageInputsSelected/);
   assert.match(trainingHandler, /!imageZipFile/);
+  assert.ok(
+    trainingHandler.indexOf("analyzeImageDataset(imageZipFile)") <
+      trainingHandler.indexOf("trainImageModel(imageZipFile)"),
+  );
+  assert.match(trainingHandler, /imageAnalysisResult\.quality\?\.validation !== "passed"/);
   assert.match(trainingHandler, /trainImageModel\(imageZipFile\)/);
   assert.match(appSource, /onClick=\{startImageTraining\}/);
-  assert.match(appSource, /Train Image Model/);
+  assert.match(appSource, /Validate Dataset Before Training/);
+  assert.match(appSource, /aria-label="Image Dataset Preflight"/);
+  assert.match(appSource, /imageAnalysisResult\.dataset\?\.skipped_files/);
 });
 
 test("deferred and ambiguous image routes expose no training or prediction action", () => {
@@ -568,6 +575,12 @@ test("successful image analysis displays backend total, classes, and percentages
   assert.match(appSource, /imageAnalysisResult\.classes\?\.images_per_class\?\.\[className\]/);
   assert.match(appSource, /distribution\?\.percentage/);
   assert.doesNotMatch(appSource, /percentage\s*=.*image_count/);
+});
+
+test("image preflight displays excluded image counts when supplied by the backend", () => {
+  assert.match(appSource, /Excluded from training:/);
+  assert.match(appSource, /dataset\.excluded_image_counts/);
+  assert.match(appSource, /displayAnalysisNumber\(count, 0\)/);
 });
 
 test("provided split counts render while unsplit datasets show no fabricated counts", () => {
